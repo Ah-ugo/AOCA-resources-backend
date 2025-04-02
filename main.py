@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
-import jwt
+from jose import JWTError, jwt
 from passlib.context import CryptContext
 import cloudinary
 import cloudinary.uploader
@@ -21,7 +21,7 @@ from models import (
     ClassCreate, ClassUpdate, ClassResponse,
     AssignmentCreate, Assignment, AssignmentUpdate, AssignmentResponse,
     CommentCreate, Comment,
-    ResourceCreate, ResourceUpdate, ResourceResponse
+    ResourceCreate, ResourceUpdate, ResourceResponse, JobCategoryCreate, JobApplicationCreate, JobListingCreate, JobCategory, JobListingResponse, JobApplicationResponse, JobListing, JobCategoryBase, JobApplicationBase, JobApplication, JobListingBase, JobLocation, JobListingUpdate, JobCategoryUpdate, JobApplicationUpdate
 )
 
 # Load environment variables
@@ -40,7 +40,7 @@ app.add_middleware(
 )
 
 # Configure MongoDB connection
-MONGO_URI = os.getenv("MONGO_URL", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGO_URL")
 client = MongoClient(MONGO_URI)
 db = client["aoca_resources"]
 
@@ -375,6 +375,337 @@ async def add_comment(
     created_comment = db.comments.find_one({"_id": result.inserted_id})
     return parse_json(created_comment)
 
+
+# Public Job Listing Endpoints
+@app.get("/careers/jobs", response_model=Dict[str, Any])
+async def get_job_listings(
+        skip: int = 0,
+        limit: int = 10,
+        category: Optional[str] = None,
+        location: Optional[str] = None,
+        remote: Optional[bool] = None,
+        employment_type: Optional[str] = None,
+        experience_level: Optional[str] = None,
+        search: Optional[str] = None,
+        sort_by: str = "created_at",
+        sort_order: int = -1  # -1 for descending, 1 for ascending
+):
+    # Build query
+    query = {"is_published": True}
+
+    if category:
+        query["category"] = category
+
+    if location:
+        query["location.city"] = {"$regex": location, "$options": "i"}
+
+    if remote is not None:
+        query["location.remote"] = remote
+
+    if employment_type:
+        query["employment_type"] = employment_type
+
+    if experience_level:
+        query["experience_level"] = experience_level
+
+    if search:
+        query["$or"] = [
+            {"title": {"$regex": search, "$options": "i"}},
+            {"company": {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}},
+            {"skills": {"$in": [{"$regex": search, "$options": "i"}]}}
+        ]
+
+    # Get job listings
+    jobs = list(db.job_listings.find(query).sort(sort_by, sort_order).skip(skip).limit(limit))
+
+    # Get total count for pagination
+    total = db.job_listings.count_documents(query)
+    # Increment view count for each job (optional)
+    for job in jobs:
+        db.job_listings.update_one(
+            {"_id": job["_id"]},
+            {"$inc": {"views": 1}}
+        )
+
+    # Get categories for filtering
+    categories = list(db.job_categories.find())
+
+    # Get locations for filtering
+    locations_pipeline = [
+        {"$match": {"is_published": True}},
+        {"$group": {"_id": "$location.city", "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}}
+    ]
+    locations = list(db.job_listings.aggregate(locations_pipeline))
+
+    # Get employment types for filtering
+    employment_types_pipeline = [
+        {"$match": {"is_published": True}},
+        {"$group": {"_id": "$employment_type", "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}}
+    ]
+    employment_types = list(db.job_listings.aggregate(employment_types_pipeline))
+
+    # Get experience levels for filtering
+    experience_levels_pipeline = [
+        {"$match": {"is_published": True}},
+        {"$group": {"_id": "$experience_level", "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}}
+    ]
+    experience_levels = list(db.job_listings.aggregate(experience_levels_pipeline))
+
+    return {
+        "jobs": parse_json(jobs),
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "filters": {
+                       "categories": parse_json(categories),
+                       "locations": parse_json(locations),
+                       "employment_types": parse_json(employment_types),
+                       "experience_levels": parse_json(experience_levels)
+                   }
+    }
+
+    @app.get("/careers/jobs/{job_id}", response_model=Dict[str, Any])
+    async def get_job_listing(job_id: str):
+        try:
+            job = db.job_listings.find_one({"_id": ObjectId(job_id), "is_published": True})
+            if not job:
+                raise HTTPException(status_code=404, detail="Job listing not found")
+
+            # Increment view count
+            db.job_listings.update_one(
+                {"_id": ObjectId(job_id)},
+                {"$inc": {"views": 1}}
+            )
+
+            # Get company info if available
+            if "created_by" in job and job["created_by"]:
+                creator = db.users.find_one({"_id": job["created_by"]})
+                if creator:
+                    job["created_by_user"] = {
+                        "id": str(creator["_id"]),
+                        "name": f"{creator.get('first_name', '')} {creator.get('last_name', '')}",
+                        "email": creator.get("email", ""),
+                        "role": creator.get("role", "")
+                    }
+
+            # Get similar jobs (same category)
+            similar_jobs = list(db.job_listings.find({
+                "category": job["category"],
+                "_id": {"$ne": ObjectId(job_id)},
+                "is_published": True
+            }).sort("created_at", -1).limit(3))
+
+            job["similar_jobs"] = parse_json(similar_jobs)
+
+            return parse_json(job)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/careers/categories", response_model=List[Dict[str, Any]])
+    async def get_job_categories():
+        categories = list(db.job_categories.find().sort("name", 1))
+        # Add job count to each category
+        for category in categories:
+            job_count = db.job_listings.count_documents({
+                "category": category["name"],
+                "is_published": True
+            })
+            category["job_count"] = job_count
+
+        return parse_json(categories)
+
+# User Job Application Endpoints
+@app.post("/careers/jobs/{job_id}/apply", response_model=JobApplicationResponse)
+async def apply_for_job(
+    job_id: str,
+    application: JobApplicationCreate,
+    current_user: User = Depends(get_current_active_user)):
+    # Check if job exists and is published
+    job = db.job_listings.find_one({"_id": ObjectId(job_id), "is_published": True})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job listing not found")
+
+    # Check if application deadline has passed
+    if "application_deadline" in job and job["application_deadline"]:
+        if datetime.utcnow() > job["application_deadline"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Application deadline has passed"
+            )
+
+    # Check if user has already applied
+    existing_application = db.job_applications.find_one({
+        "user_id": ObjectId(current_user.id),
+        "job_id": ObjectId(job_id)
+    })
+
+    if existing_application:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You have already applied for this job"
+        )
+
+        # Prepare application data
+        application_data = application.dict()
+        application_data["user_id"] = ObjectId(current_user.id)
+        application_data["job_id"] = ObjectId(job_id)
+        application_data["created_at"] = datetime.utcnow()
+        application_data["updated_at"] = datetime.utcnow()
+        application_data["status"] = "applied"
+
+        # Insert into database
+        result = db.job_applications.insert_one(application_data)
+
+        # Update application count for the job
+        db.job_listings.update_one(
+            {"_id": ObjectId(job_id)},
+            {"$inc": {"applications_count": 1}}
+        )
+
+        # Return created application
+        created_application = db.job_applications.find_one({"_id": result.inserted_id})
+
+        # Add job and user info
+        created_application["job"] = {
+            "id": str(job["_id"]),
+            "title": job["title"],
+            "company": job["company"]
+        }
+
+        created_application["user"] = {
+            "id": str(current_user.id),
+            "name": f"{current_user.first_name} {current_user.last_name}",
+            "email": current_user.email
+        }
+
+        return parse_json(created_application)
+
+@app.get("/careers/applications", response_model=Dict[str, Any])
+async def get_user_applications(
+        current_user: User = Depends(get_current_active_user),
+        skip: int = 0,
+        limit: int = 10,
+        status: Optional[str] = None
+):
+    # Build query
+    query = {"user_id": ObjectId(current_user.id)}
+
+    if status:
+        query["status"] = status
+
+    # Get applications
+    applications = list(db.job_applications.find(query).sort("created_at", -1).skip(skip).limit(limit))
+
+    # Get total count for pagination
+    total = db.job_applications.count_documents(query)
+
+    # Add job info to each application
+    for application in applications:
+        job = db.job_listings.find_one({"_id": application["job_id"]})
+        if job:
+            application["job"] = {
+                "id": str(job["_id"]),
+                "title": job["title"],
+                "company": job["company"],
+                "location": job["location"],
+                "employment_type": job["employment_type"]
+            }
+
+    return {
+        "applications": parse_json(applications),
+        "total": total,
+        "skip": skip,
+        "limit": limit
+    }
+
+@app.get("/careers/applications/{application_id}", response_model=JobApplicationResponse)
+async def get_application_details(
+        application_id: str,
+        current_user: User = Depends(get_current_active_user)
+):
+    # Get application
+    application = db.job_applications.find_one({
+        "_id": ObjectId(application_id),
+        "user_id": ObjectId(current_user.id)
+    })
+
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    # Get job details
+    job = db.job_listings.find_one({"_id": application["job_id"]})
+    if job:
+        application["job"] = parse_json(job)
+
+    return parse_json(application)
+
+@app.delete("/careers/applications/{application_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def withdraw_application(
+        application_id: str,
+        current_user: User = Depends(get_current_active_user)
+):
+    # Check if application exists and belongs to user
+    application = db.job_applications.find_one({
+        "_id": ObjectId(application_id),
+        "user_id": ObjectId(current_user.id)
+    })
+
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    # Check if application can be withdrawn (only if status is 'applied')
+    if application["status"] != "applied":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot withdraw application with status '{application['status']}'"
+        )
+
+    # Delete application
+    db.job_applications.delete_one({"_id": ObjectId(application_id)})
+
+    # Update application count for the job
+    db.job_listings.update_one(
+        {"_id": application["job_id"]},
+        {"$inc": {"applications_count": -1}}
+    )
+
+    return None
+
+# Resume upload endpoint
+@app.post("/careers/upload/resume")
+async def upload_resume(
+        file: UploadFile = File(...),
+        current_user: User = Depends(get_current_active_user)
+):
+    try:
+        # Check file type
+        allowed_extensions = ['.pdf', '.doc', '.docx']
+        file_ext = os.path.splitext(file.filename)[1].lower()
+
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File type not allowed. Allowed types: {', '.join(allowed_extensions)}"
+            )
+
+        # Read file content
+        contents = await file.read()
+
+        # Upload to Cloudinary with resource type 'raw' for documents
+        result = cloudinary.uploader.upload(
+            contents,
+            resource_type="raw",
+            folder="resumes",
+            public_id=f"{current_user.id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        )
+
+        return {"url": result["secure_url"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Dashboard endpoints
 @app.get("/dashboard/overview", response_model=Dict[str, Any])
@@ -1091,6 +1422,394 @@ async def delete_blog_category(
         "placeholder_posts_deleted": result.deleted_count
     }
 
+
+# Jobs Management
+@app.get("/admin/careers/jobs", response_model=Dict[str, Any])
+async def admin_get_job_listings(
+        admin_user: User = Depends(get_admin_user),
+        skip: int = 0,
+        limit: int = 100,
+        category: Optional[str] = None,
+        is_published: Optional[bool] = None,
+        search: Optional[str] = None
+):
+    # Build query
+    query = {}
+
+    if category:
+        query["category"] = category
+
+    if is_published is not None:
+        query["is_published"] = is_published
+
+    if search:
+        query["$or"] = [
+            {"title": {"$regex": search, "$options": "i"}},
+            {"company": {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}}
+        ]
+
+    # Get job listings
+    jobs = list(db.job_listings.find(query).sort("created_at", -1).skip(skip).limit(limit))
+
+    # Get total count for pagination
+    total = db.job_listings.count_documents(query)
+
+    # Add application count to each job
+    for job in jobs:
+        job["applications_count"] = db.job_applications.count_documents({"job_id": job["_id"]})
+
+    return {
+        "jobs": parse_json(jobs),
+        "total": total,
+        "skip": skip,
+        "limit": limit
+    }
+
+@app.post("/admin/careers/jobs", response_model=JobListingResponse)
+async def admin_create_job_listing(
+        job: JobListingCreate,
+        admin_user: User = Depends(get_admin_user)
+    ):
+    # Prepare job data
+    job_data = job.dict()
+    job_data["created_by"] = ObjectId(admin_user.id)
+    job_data["created_at"] = datetime.utcnow()
+    job_data["updated_at"] = datetime.utcnow()
+    job_data["views"] = 0
+    job_data["applications_count"] = 0
+
+    # Insert into database
+    result = db.job_listings.insert_one(job_data)
+
+    # Return created job
+    created_job = db.job_listings.find_one({"_id": result.inserted_id})
+    return parse_json(created_job)
+
+@app.put("/admin/careers/jobs/{job_id}", response_model=JobListingResponse)
+async def admin_update_job_listing(
+        job_id: str,
+        job_update: JobListingUpdate,
+        admin_user: User = Depends(get_admin_user)
+):
+    # Check if job exists
+    existing_job = db.job_listings.find_one({"_id": ObjectId(job_id)})
+    if not existing_job:
+        raise HTTPException(status_code=404, detail="Job listing not found")
+
+    # Update job
+    update_data = job_update.dict(exclude_unset=True)
+    update_data["updated_at"] = datetime.utcnow()
+
+    db.job_listings.update_one(
+        {"_id": ObjectId(job_id)},
+        {"$set": update_data}
+    )
+
+    # Return updated job
+    updated_job = db.job_listings.find_one({"_id": ObjectId(job_id)})
+    return parse_json(updated_job)
+
+@app.delete("/admin/careers/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_delete_job_listing(
+        job_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    # Check if job exists
+    existing_job = db.job_listings.find_one({"_id": ObjectId(job_id)})
+    if not existing_job:
+        raise HTTPException(status_code=404, detail="Job listing not found")
+
+    # Delete job
+    db.job_listings.delete_one({"_id": ObjectId(job_id)})
+
+    # Delete associated applications
+    db.job_applications.delete_many({"job_id": ObjectId(job_id)})
+
+    return None
+
+@app.get("/admin/careers/applications", response_model=Dict[str, Any])
+async def admin_get_job_applications(
+        admin_user: User = Depends(get_admin_user),
+        skip: int = 0,
+        limit: int = 100,
+        job_id: Optional[str] = None,
+        status: Optional[str] = None,
+        search: Optional[str] = None
+):
+    # Build query
+    query = {}
+
+    if job_id:
+        query["job_id"] = ObjectId(job_id)
+
+    if status:
+        query["status"] = status
+
+    # Get applications
+    applications = list(db.job_applications.find(query).sort("created_at", -1).skip(skip).limit(limit))
+
+    # Get total count for pagination
+    total = db.job_applications.count_documents(query)
+
+    # Add job and user info to each application
+    for application in applications:
+        # Get job info
+        job = db.job_listings.find_one({"_id": application["job_id"]})
+        if job:
+            application["job"] = {
+                "id": str(job["_id"]),
+                "title": job["title"],
+                "company": job["company"]
+            }
+
+        # Get user info
+        user = db.users.find_one({"_id": application["user_id"]})
+        if user:
+            application["user"] = {
+                "id": str(user["_id"]),
+                "name": f"{user.get('first_name', '')} {user.get('last_name', '')}",
+                "email": user.get("email", "")
+            }
+
+    return {
+        "applications": parse_json(applications),
+        "total": total,
+        "skip": skip,
+        "limit": limit
+    }
+
+
+@app.get("/admin/careers/applications/{application_id}", response_model=JobApplicationResponse)
+async def admin_get_application_details(
+        application_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    # Get application
+    application = db.job_applications.find_one({"_id": ObjectId(application_id)})
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    # Get job details
+    job = db.job_listings.find_one({"_id": application["job_id"]})
+    if job:
+        application["job"] = parse_json(job)
+        # Get user details
+        user = db.users.find_one({"_id": application["user_id"]})
+        if user:
+            application["user"] = {
+                "id": str(user["_id"]),
+                "name": f"{user.get('first_name', '')} {user.get('last_name', '')}",
+                "email": user.get("email", ""),
+                "phone": user.get("phone", ""),
+                "address": user.get("address", ""),
+                "bio": user.get("bio", ""),
+                "image": user.get("image", "")
+            }
+
+        return parse_json(application)
+
+@app.put("/admin/careers/applications/{application_id}", response_model=JobApplicationResponse)
+async def admin_update_application_status(
+        application_id: str,
+        application_update: JobApplicationUpdate,
+        admin_user: User = Depends(get_admin_user)
+):
+    # Check if application exists
+    existing_application = db.job_applications.find_one({"_id": ObjectId(application_id)})
+    if not existing_application:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    # Update application
+    update_data = application_update.dict(exclude_unset=True)
+    update_data["updated_at"] = datetime.utcnow()
+
+    db.job_applications.update_one(
+        {"_id": ObjectId(application_id)},
+        {"$set": update_data}
+    )
+
+    # Return updated application
+    updated_application = db.job_applications.find_one({"_id": ObjectId(application_id)})
+
+    # Get job details
+    job = db.job_listings.find_one({"_id": updated_application["job_id"]})
+    if job:
+        updated_application["job"] = {
+            "id": str(job["_id"]),
+            "title": job["title"],
+            "company": job["company"]
+        }
+
+        # Get user details
+        user = db.users.find_one({"_id": updated_application["user_id"]})
+        if user:
+            updated_application["user"] = {
+                "id": str(user["_id"]),
+                "name": f"{user.get('first_name', '')} {user.get('last_name', '')}",
+                "email": user.get("email", "")
+            }
+
+        return parse_json(updated_application)
+
+@app.post("/admin/careers/categories", response_model=JobCategory)
+async def admin_create_job_category(
+        category: JobCategoryCreate,
+        admin_user: User = Depends(get_admin_user)
+):
+    # Check if category already exists
+    existing_category = db.job_categories.find_one({"name": category.name})
+    if existing_category:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Category already exists"
+        )
+
+    # Prepare category data
+    category_data = category.dict()
+    category_data["created_at"] = datetime.utcnow()
+    category_data["updated_at"] = datetime.utcnow()
+    category_data["job_count"] = 0
+
+    # Insert into database
+    result = db.job_categories.insert_one(category_data)
+
+    # Return created category
+    created_category = db.job_categories.find_one({"_id": result.inserted_id})
+    return parse_json(created_category)
+
+@app.put("/admin/careers/categories/{category_id}", response_model=JobCategory)
+async def admin_update_job_category(
+        category_id: str,
+        category_update: JobCategoryUpdate,
+        admin_user: User = Depends(get_admin_user)
+):
+    # Check if category exists
+    existing_category = db.job_categories.find_one({"_id": ObjectId(category_id)})
+    if not existing_category:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    # Update category
+    update_data = category_update.dict(exclude_unset=True)
+    update_data["updated_at"] = datetime.utcnow()
+
+    db.job_categories.update_one(
+        {"_id": ObjectId(category_id)},
+        {"$set": update_data}
+    )
+
+    # If name is updated, update all job listings with this category
+    if "name" in update_data and update_data["name"] != existing_category["name"]:
+        db.job_listings.update_many(
+            {"category": existing_category["name"]},
+            {"$set": {"category": update_data["name"]}}
+        )
+
+    # Return updated category
+    updated_category = db.job_categories.find_one({"_id": ObjectId(category_id)})
+
+    # Update job count
+    job_count = db.job_listings.count_documents({"category": updated_category["name"]})
+    updated_category["job_count"] = job_count
+
+    return parse_json(updated_category)
+
+@app.delete("/admin/careers/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_delete_job_category(
+        category_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    # Check if category exists
+    existing_category = db.job_categories.find_one({"_id": ObjectId(category_id)})
+    if not existing_category:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    # Check if category is in use
+    job_count = db.job_listings.count_documents({"category": existing_category["name"]})
+    if job_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete category with {job_count} job listings. Update or delete the listings first."
+        )
+
+    # Delete category
+    db.job_categories.delete_one({"_id": ObjectId(category_id)})
+
+    return None
+
+@app.get("/admin/careers/stats", response_model=Dict[str, Any])
+async def admin_get_careers_stats(
+                admin_user: User = Depends(get_admin_user)
+):
+    # Get job statistics
+    total_jobs = db.job_listings.count_documents({})
+    published_jobs = db.job_listings.count_documents({"is_published": True})
+    featured_jobs = db.job_listings.count_documents({"is_featured": True})
+
+    # Get application statistics
+    total_applications = db.job_applications.count_documents({})
+    applications_by_status = list(db.job_applications.aggregate([
+        {"$group": {"_id": "$status",
+        "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}}
+    ]))
+
+    # Get category statistics
+    categories = list(db.job_categories.find())
+    for category in categories:
+        job_count = db.job_listings.count_documents({"category": category["name"]})
+        category["job_count"] = job_count
+
+    # Get recent activity
+    recent_jobs = list(db.job_listings.find().sort("created_at", -1).limit(5))
+    recent_applications = list(db.job_applications.find().sort("created_at", -1).limit(5))
+
+    # Add job and user info to recent applications
+    for application in recent_applications:
+        # Get job info
+        job = db.job_listings.find_one({"_id": application["job_id"]})
+        if job:
+            application["job"] = {
+                "id": str(job["_id"]),
+                "title": job["title"],
+                "company": job["company"]
+            }
+
+        # Get user info
+        user = db.users.find_one({"_id": application["user_id"]})
+        if user:
+            application["user"] = {
+                "id": str(user["_id"]),
+                "name": f"{user.get('first_name', '')} {user.get('last_name', '')}",
+                "email": user.get("email", "")
+            }
+
+            # Get top viewed jobs
+            top_viewed_jobs = list(db.job_listings.find().sort("views", -1).limit(5))
+
+            # Get jobs with most applications
+            top_applied_jobs = list(db.job_listings.find().sort("applications_count", -1).limit(5))
+
+            return {
+                "job_stats": {
+                    "total": total_jobs,
+                    "published": published_jobs,
+                    "featured": featured_jobs
+                },
+                "application_stats": {
+                    "total": total_applications,
+                    "by_status": parse_json(applications_by_status)
+                },
+                "categories": parse_json(categories),
+                "recent_activity": {
+                    "jobs": parse_json(recent_jobs),
+                    "applications": parse_json(recent_applications)
+                },
+                "top_jobs": {
+                    "by_views": parse_json(top_viewed_jobs),
+                    "by_applications": parse_json(top_applied_jobs)
+                }
+            }
 
 # Class Management
 @app.get("/admin/classes", response_model=Dict[str, Any])

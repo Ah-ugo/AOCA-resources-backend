@@ -158,6 +158,142 @@ class Comment(CommentBase):
     }
 
 
+# Job Board Models
+class JobLocation(BaseModel):
+    city: str
+    state: Optional[str] = None
+    country: str
+    remote: bool = False
+    hybrid: bool = False
+
+class JobListingBase(BaseModel):
+    title: str
+    company: str
+    description: str
+    requirements: List[str]
+    responsibilities: List[str]
+    location: JobLocation
+    salary_min: Optional[float] = None
+    salary_max: Optional[float] = None
+    salary_currency: Optional[str] = "USD"
+    employment_type: str  # full-time, part-time, contract, internship
+    category: str  # engineering, marketing, sales, etc.
+    experience_level: str  # entry, mid, senior
+    education: Optional[str] = None
+    skills: List[str]
+    benefits: Optional[List[str]] = []
+    application_url: Optional[str] = None  # External application URL if any
+    application_email: Optional[EmailStr] = None
+    application_deadline: Optional[datetime] = None
+    is_featured: bool = False
+    is_published: bool = True
+
+class JobListingCreate(JobListingBase):
+    pass
+
+class JobListingUpdate(BaseModel):
+    title: Optional[str] = None
+    company: Optional[str] = None
+    description: Optional[str] = None
+    requirements: Optional[List[str]] = None
+    responsibilities: Optional[List[str]] = None
+    location: Optional[JobLocation] = None
+    salary_min: Optional[float] = None
+    salary_max: Optional[float] = None
+    salary_currency: Optional[str] = None
+    employment_type: Optional[str] = None
+    category: Optional[str] = None
+    experience_level: Optional[str] = None
+    education: Optional[str] = None
+    skills: Optional[List[str]] = None
+    benefits: Optional[List[str]] = None
+    application_url: Optional[str] = None
+    application_email: Optional[EmailStr] = None
+    application_deadline: Optional[datetime] = None
+    is_featured: Optional[bool] = None
+    is_published: Optional[bool] = None
+
+class JobListing(JobListingBase):
+    id: Optional[PyObjectId] = Field(alias="_id")
+    created_by: Optional[PyObjectId] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    views: int = 0
+    applications_count: int = 0
+
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {
+            ObjectId: str
+        }
+
+class JobListingResponse(JobListing):
+    created_by_user: Optional[Dict[str, Any]] = None
+
+class JobApplicationBase(BaseModel):
+    job_id: str
+    cover_letter: Optional[str] = None
+    resume_url: str
+    phone: str
+    linkedin_url: Optional[str] = None
+    portfolio_url: Optional[str] = None
+    referral: Optional[str] = None
+    additional_info: Optional[str] = None
+
+class JobApplicationCreate(JobApplicationBase):
+    pass
+
+class JobApplicationUpdate(BaseModel):
+    status: Optional[str] = None  # applied, reviewed, interview, rejected, hired
+    admin_notes: Optional[str] = None
+    interview_date: Optional[datetime] = None
+
+class JobApplication(JobApplicationBase):
+    id: Optional[PyObjectId] = Field(alias="_id")
+    user_id: PyObjectId
+    job_id: PyObjectId
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    status: str = "applied"  # applied, reviewed, interview, rejected, hired
+    admin_notes: Optional[str] = None
+    interview_date: Optional[datetime] = None
+
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {
+            ObjectId: str
+        }
+
+class JobApplicationResponse(JobApplication):
+    user: Optional[Dict[str, Any]] = None
+    job: Optional[Dict[str, Any]] = None
+
+class JobCategoryBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    icon: Optional[str] = None
+
+class JobCategoryCreate(JobCategoryBase):
+    pass
+
+class JobCategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+
+class JobCategory(JobCategoryBase):
+    id: Optional[PyObjectId] = Field(alias="_id")
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    job_count: int = 0
+
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {
+            ObjectId: str
+        }
+
+
 # Course models
 class CourseBase(BaseModel):
     name: str
