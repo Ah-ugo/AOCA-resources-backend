@@ -468,55 +468,55 @@ async def get_job_listings(
                    }
     }
 
-    @app.get("/careers/jobs/{job_id}", response_model=Dict[str, Any])
-    async def get_job_listing(job_id: str):
-        try:
-            job = db.job_listings.find_one({"_id": ObjectId(job_id), "is_published": True})
-            if not job:
-                raise HTTPException(status_code=404, detail="Job listing not found")
+@app.get("/careers/jobs/{job_id}", response_model=Dict[str, Any])
+async def get_job_listing(job_id: str):
+    try:
+        job = db.job_listings.find_one({"_id": ObjectId(job_id), "is_published": True})
+        if not job:
+            raise HTTPException(status_code=404, detail="Job listing not found")
 
-            # Increment view count
-            db.job_listings.update_one(
-                {"_id": ObjectId(job_id)},
-                {"$inc": {"views": 1}}
-            )
+        # Increment view count
+        db.job_listings.update_one(
+            {"_id": ObjectId(job_id)},
+            {"$inc": {"views": 1}}
+        )
 
-            # Get company info if available
-            if "created_by" in job and job["created_by"]:
-                creator = db.users.find_one({"_id": job["created_by"]})
-                if creator:
-                    job["created_by_user"] = {
-                        "id": str(creator["_id"]),
-                        "name": f"{creator.get('first_name', '')} {creator.get('last_name', '')}",
-                        "email": creator.get("email", ""),
-                        "role": creator.get("role", "")
-                    }
+        # Get company info if available
+        if "created_by" in job and job["created_by"]:
+            creator = db.users.find_one({"_id": job["created_by"]})
+            if creator:
+                job["created_by_user"] = {
+                    "id": str(creator["_id"]),
+                    "name": f"{creator.get('first_name', '')} {creator.get('last_name', '')}",
+                    "email": creator.get("email", ""),
+                    "role": creator.get("role", "")
+                }
 
-            # Get similar jobs (same category)
-            similar_jobs = list(db.job_listings.find({
-                "category": job["category"],
-                "_id": {"$ne": ObjectId(job_id)},
-                "is_published": True
-            }).sort("created_at", -1).limit(3))
+        # Get similar jobs (same category)
+        similar_jobs = list(db.job_listings.find({
+            "category": job["category"],
+            "_id": {"$ne": ObjectId(job_id)},
+            "is_published": True
+        }).sort("created_at", -1).limit(3))
 
-            job["similar_jobs"] = parse_json(similar_jobs)
+        job["similar_jobs"] = parse_json(similar_jobs)
 
-            return parse_json(job)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        return parse_json(job)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/careers/categories", response_model=List[Dict[str, Any]])
-    async def get_job_categories():
-        categories = list(db.job_categories.find().sort("name", 1))
-        # Add job count to each category
-        for category in categories:
-            job_count = db.job_listings.count_documents({
-                "category": category["name"],
-                "is_published": True
-            })
-            category["job_count"] = job_count
+@app.get("/careers/categories", response_model=List[Dict[str, Any]])
+async def get_job_categories():
+    categories = list(db.job_categories.find().sort("name", 1))
+    # Add job count to each category
+    for category in categories:
+        job_count = db.job_listings.count_documents({
+            "category": category["name"],
+            "is_published": True
+        })
+        category["job_count"] = job_count
 
-        return parse_json(categories)
+    return parse_json(categories)
 
 # User Job Application Endpoints
 @app.post("/careers/jobs/{job_id}/apply", response_model=JobApplicationResponse)
