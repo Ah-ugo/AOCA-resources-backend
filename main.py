@@ -549,40 +549,40 @@ async def apply_for_job(
             detail="You have already applied for this job"
         )
 
-        # Prepare application data
-        application_data = application.dict()
-        application_data["user_id"] = ObjectId(current_user.id)
-        application_data["job_id"] = ObjectId(job_id)
-        application_data["created_at"] = datetime.utcnow()
-        application_data["updated_at"] = datetime.utcnow()
-        application_data["status"] = "applied"
+    # Prepare application data
+    application_data = application.dict()
+    application_data["user_id"] = ObjectId(current_user.id)
+    application_data["job_id"] = ObjectId(job_id)
+    application_data["created_at"] = datetime.utcnow()
+    application_data["updated_at"] = datetime.utcnow()
+    application_data["status"] = "applied"
 
-        # Insert into database
-        result = db.job_applications.insert_one(application_data)
+    # Insert into database
+    result = db.job_applications.insert_one(application_data)
 
-        # Update application count for the job
-        db.job_listings.update_one(
-            {"_id": ObjectId(job_id)},
-            {"$inc": {"applications_count": 1}}
-        )
+    # Update application count for the job
+    db.job_listings.update_one(
+        {"_id": ObjectId(job_id)},
+        {"$inc": {"applications_count": 1}}
+    )
 
-        # Return created application
-        created_application = db.job_applications.find_one({"_id": result.inserted_id})
+    # Return created application
+    created_application = db.job_applications.find_one({"_id": result.inserted_id})
 
-        # Add job and user info
-        created_application["job"] = {
-            "id": str(job["_id"]),
-            "title": job["title"],
-            "company": job["company"]
-        }
+    # Add job and user info
+    created_application["job"] = {
+        "id": str(job["_id"]),
+        "title": job["title"],
+        "company": job["company"]
+    }
 
-        created_application["user"] = {
-            "id": str(current_user.id),
-            "name": f"{current_user.first_name} {current_user.last_name}",
-            "email": current_user.email
-        }
+    created_application["user"] = {
+        "id": str(current_user.id),
+        "name": f"{current_user.first_name} {current_user.last_name}",
+        "email": current_user.email
+    }
 
-        return parse_json(created_application)
+    return parse_json(created_application)
 
 @app.get("/careers/applications", response_model=Dict[str, Any])
 async def get_user_applications(
