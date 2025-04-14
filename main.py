@@ -838,6 +838,134 @@ async def get_user_classes(
     return parse_json(classes)
 
 
+# Add this endpoint to get students enrolled in a course
+@app.get("/admin/courses/{course_id}/students", response_model=Dict[str, Any])
+async def get_course_students(
+        course_id: str,
+        skip: int = 0,
+        limit: int = 100,
+        admin_user: User = Depends(get_admin_user)
+):
+    """
+    Get all students enrolled in a specific course with pagination.
+    Returns student details along with enrollment information.
+    """
+    # Check if course exists
+    course = db.courses.find_one({"_id": ObjectId(course_id)})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    # Get enrollments for this course
+    enrollments = list(db.user_courses.find(
+        {"course_id": ObjectId(course_id)}
+    ).skip(skip).limit(limit))
+
+    # Get total count for pagination
+    total = db.user_courses.count_documents({"course_id": ObjectId(course_id)})
+
+    # Get student details for each enrollment
+    student_ids = [enrollment["user_id"] for enrollment in enrollments]
+    students = list(db.users.find({"_id": {"$in": student_ids}}))
+
+    # Format response
+    formatted_students = []
+    for student in students:
+        # Find the corresponding enrollment
+        enrollment = next(
+            (e for e in enrollments if str(e["user_id"]) == str(student["_id"])),
+            None
+        )
+
+        formatted_students.append({
+            "id": str(student["_id"]),
+            "name": f"{student.get('first_name', '')} {student.get('last_name', '')}",
+            "email": student.get("email", ""),
+            "role": student.get("role", ""),
+            "image": student.get("image", ""),
+            "enrollment_date": enrollment["enrolled_at"] if enrollment else None,
+            "enrollment_status": enrollment["status"] if enrollment else None
+        })
+
+    return {
+        "students": parse_json(formatted_students),
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "course": {
+            "id": str(course["_id"]),
+            "name": course["name"],
+            "level": course["level"]
+        }
+    }
+
+
+# Add this endpoint to get a class by ID
+@app.get("/admin/classes/{class_id}", response_model=Dict[str, Any])
+async def get_class_by_id(
+        class_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    """
+    Get detailed information about a specific class including:
+    - Class details
+    - Course information
+    - Instructor information
+    - List of enrolled students
+    """
+    # Get the class
+    class_data = db.classes.find_one({"_id": ObjectId(class_id)})
+    if not class_data:
+        raise HTTPException(status_code=404, detail="Class not found")
+
+    # Get course information
+    course = db.courses.find_one({"_id": class_data["course_id"]})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    # Get instructor information if available
+    instructor = None
+    if "instructor_id" in class_data and class_data["instructor_id"]:
+        instructor = db.users.find_one({"_id": class_data["instructor_id"]})
+
+    # Get enrolled students
+    enrollments = list(db.user_courses.find({"course_id": class_data["course_id"]}))
+    student_ids = [enrollment["user_id"] for enrollment in enrollments]
+    students = list(db.users.find({"_id": {"$in": student_ids}}))
+
+    # Format student data
+    formatted_students = []
+    for student in students:
+        formatted_students.append({
+            "id": str(student["_id"]),
+            "name": f"{student.get('first_name', '')} {student.get('last_name', '')}",
+            "email": student.get("email", ""),
+            "image": student.get("image", "")
+        })
+
+    # Format response
+    response = {
+        "class": parse_json(class_data),
+        "course": {
+            "id": str(course["_id"]),
+            "name": course["name"],
+            "description": course.get("description", ""),
+            "level": course.get("level", "")
+        },
+        "instructor": None,
+        "students": formatted_students
+    }
+
+    if instructor:
+        response["instructor"] = {
+            "id": str(instructor["_id"]),
+            "name": f"{instructor.get('first_name', '')} {instructor.get('last_name', '')}",
+            "email": instructor.get("email", ""),
+            "image": instructor.get("image", "")
+        }
+
+    return response
+
+
 @app.get("/dashboard/resources", response_model=List[Dict[str, Any]])
 async def get_learning_resources(
         current_user: User = Depends(get_current_active_user),
