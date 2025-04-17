@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
 import json
 from models import (
     UserCreate, User, UserInDB, UserLogin, Token, TokenData,
