@@ -476,3 +476,12 @@ class ResourceResponse(BaseModel):
         if isinstance(obj, datetime):
             return obj.isoformat()
         return obj
+
+
+class ContactForm(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    phone: str
+    service: str
+    message: str

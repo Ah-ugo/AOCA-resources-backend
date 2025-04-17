@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal, Union
+from pydantic import conint
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
@@ -12,10 +13,15 @@ import cloudinary.uploader
 from pymongo import MongoClient
 from bson import ObjectId
 from pydantic import BaseModel, Field, EmailStr
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import json
 from models import (
     UserCreate, User, UserInDB, UserLogin, Token, TokenData,
-    UserUpdate, UserResponse,
+    UserUpdate, UserResponse, ContactForm,
     BlogPostCreate, BlogPost, BlogPostUpdate, BlogPostResponse,
     CourseCreate, Course, CourseUpdate, CourseResponse,
     ClassCreate, ClassUpdate, ClassResponse,
@@ -138,6 +144,26 @@ async def get_admin_user(current_user: User = Depends(get_current_active_user)):
 # Helper function to convert ObjectId to string
 def parse_json(data):
     return json.loads(json.dumps(data, default=str))
+
+
+# Mount static files (create a 'static' directory in your project)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.post("/contact", status_code=status.HTTP_201_CREATED)
+async def submit_contact_form(contact: ContactForm):
+    # Save to database
+    contact_data = contact.dict()
+    contact_data["created_at"] = datetime.utcnow()
+    contact_data["is_read"] = False
+
+    # Insert into database
+    db.contact_submissions.insert_one(contact_data)
+
+    return {"message": "Thank you for your message. We'll get back to you soon!"}
+
+
+
 
 
 # Authentication endpoints
@@ -2455,5 +2481,258 @@ async def get_admin_dashboard_stats(
             "posts": parse_json(recent_posts)
         }
     }
+
+
+# Admin Contact Submissions Template
+@app.get("/admin/contact-submissions", response_class=HTMLResponse)
+async def view_contact_submissions(admin_user: User = Depends(get_admin_user)):
+    submissions = list(db.contact_submissions.find().sort("created_at", -1))
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Contact Submissions</title>
+        <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    </head>
+    <body class="bg-gray-100">
+        <div class="container mx-auto px-4 py-8">
+            <h1 class="text-3xl font-bold text-gray-800 mb-8">Contact Form Submissions</h1>
+
+            <div class="bg-white shadow-md rounded-lg overflow-hidden">
+                <table class="min-w-full leading-normal">
+                    <thead>
+                        <tr>
+                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                                Name
+                            </th>
+                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                                Contact Info
+                            </th>
+                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                                Service
+                            </th>
+                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                                Message
+                            </th>
+                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                                Date
+                            </th>
+                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                                Status
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {"".join([f"""
+                        <tr class="{'bg-gray-50' if i % 2 == 0 else 'bg-white'}">
+                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
+                                <p class="text-gray-900 whitespace-nowrap">{sub['first_name']} {sub['last_name']}</p>
+                            </td>
+                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
+                                <p class="text-gray-600">{sub['email']}</p>
+                                <p class="text-gray-600">{sub.get('phone', 'N/A')}</p>
+                            </td>
+                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
+                                <p class="text-gray-900 whitespace-nowrap">{sub['service']}</p>
+                            </td>
+                            <td class="px-5 py-5 border-b border-gray-200 text-sm max-w-xs">
+                                <p class="text-gray-900 truncate" title="{sub['message']}">{sub['message'][:50]}...</p>
+                            </td>
+                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
+                                <p class="text-gray-600 whitespace-nowrap">{sub['created_at'].strftime('%Y-%m-%d %H:%M')}</p>
+                            </td>
+                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
+                                <span class="relative inline-block px-3 py-1 font-semibold leading-tight 
+                                    {'text-green-900 bg-green-200' if sub.get('is_read', False) else 'text-orange-900 bg-orange-200'}">
+                                    <span class="relative">{'Read' if sub.get('is_read', False) else 'Unread'}</span>
+                                </span>
+                            </td>
+                        </tr>
+                        """ for i, sub in enumerate(submissions)])}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(content=html_content)
+
+
+# Mark submission as read
+# Get single submission
+@app.get("/admin/contact-submissions/{submission_id}")
+async def get_contact_submission(
+        submission_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    submission = db.contact_submissions.find_one({"_id": ObjectId(submission_id)})
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    return parse_json(submission)
+
+
+# Mark submission as read
+@app.put("/admin/contact-submissions/{submission_id}/mark-read", status_code=status.HTTP_200_OK)
+async def mark_submission_read(
+        submission_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    result = db.contact_submissions.update_one(
+        {"_id": ObjectId(submission_id)},
+        {"$set": {"is_read": True}}
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    return {"message": "Submission marked as read"}
+
+
+# Contact Form REST API for Admin
+
+@app.get("/admin/contact-submissions/list/", response_model=Dict[str, Any])
+async def get_all_contact_submissions(
+        admin_user: User = Depends(get_admin_user),
+        skip: int = Query(0, ge=0),
+        limit: int = Query(20, ge=1, le=100),
+        read_status: Optional[bool] = None,
+        sort_by: Literal["created_at", "first_name", "last_name"] = "created_at",
+        sort_order: Union[Literal[-1, 1], conint(ge=-1, le=1)] = -1
+):
+    """
+    Get all contact form submissions with pagination and filtering
+
+    Parameters:
+    - skip: Pagination offset (default: 0)
+    - limit: Items per page (default: 20, max: 100)
+    - read_status: Filter by read status (true/false)
+    - sort_by: Field to sort by (created_at, first_name, last_name)
+    - sort_order: Sort order (1 for ascending, -1 for descending)
+    """
+    # Convert sort_order to integer if it comes as string
+    if isinstance(sort_order, str):
+        try:
+            sort_order = int(sort_order)
+            if sort_order not in (-1, 1):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="sort_order must be either -1 or 1"
+            )
+
+    # Build query
+    query = {}
+    if read_status is not None:
+        query["is_read"] = read_status
+
+    # Get submissions
+    submissions = list(db.contact_submissions.find(query)
+                       .sort(sort_by, sort_order)
+                       .skip(skip)
+                       .limit(limit))
+
+    # Get total count
+    total = db.contact_submissions.count_documents(query)
+
+    # Convert ObjectId to string
+    for sub in submissions:
+        sub["_id"] = str(sub["_id"])
+
+    return {
+        "data": parse_json(submissions),
+        "pagination": {
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "has_more": skip + limit < total
+        }
+    }
+
+
+@app.get("/admin/contact-submissions/{submission_id}", response_model=Dict[str, Any])
+async def get_contact_submission(
+        submission_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    """
+    Get a single contact form submission by ID
+    """
+    try:
+        submission = db.contact_submissions.find_one({"_id": ObjectId(submission_id)})
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+
+        # Mark as read when viewed
+        db.contact_submissions.update_one(
+            {"_id": ObjectId(submission_id)},
+            {"$set": {"is_read": True}}
+        )
+
+        submission["_id"] = str(submission["_id"])
+        return parse_json(submission)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid submission ID")
+
+
+@app.put("/admin/contact-submissions/{submission_id}/read", status_code=status.HTTP_200_OK)
+async def mark_submission_read(
+        submission_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    """
+    Mark a submission as read
+    """
+    result = db.contact_submissions.update_one(
+        {"_id": ObjectId(submission_id)},
+        {"$set": {"is_read": True}}
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    return {"success": True, "message": "Submission marked as read"}
+
+
+@app.put("/admin/contact-submissions/{submission_id}/unread", status_code=status.HTTP_200_OK)
+async def mark_submission_unread(
+        submission_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    """
+    Mark a submission as unread
+    """
+    result = db.contact_submissions.update_one(
+        {"_id": ObjectId(submission_id)},
+        {"$set": {"is_read": False}}
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    return {"success": True, "message": "Submission marked as unread"}
+
+
+@app.delete("/admin/contact-submissions/{submission_id}", status_code=status.HTTP_200_OK)
+async def delete_submission(
+        submission_id: str,
+        admin_user: User = Depends(get_admin_user)
+):
+    """
+    Delete a contact form submission
+    """
+    result = db.contact_submissions.delete_one({"_id": ObjectId(submission_id)})
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    return {"success": True, "message": "Submission deleted"}
 
 
