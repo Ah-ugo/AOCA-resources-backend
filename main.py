@@ -2484,84 +2484,84 @@ async def get_admin_dashboard_stats(
 
 
 # Admin Contact Submissions Template
-@app.get("/admin/contact-submissions", response_class=HTMLResponse)
-async def view_contact_submissions(admin_user: User = Depends(get_admin_user)):
-    submissions = list(db.contact_submissions.find().sort("created_at", -1))
-
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Contact Submissions</title>
-        <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    </head>
-    <body class="bg-gray-100">
-        <div class="container mx-auto px-4 py-8">
-            <h1 class="text-3xl font-bold text-gray-800 mb-8">Contact Form Submissions</h1>
-
-            <div class="bg-white shadow-md rounded-lg overflow-hidden">
-                <table class="min-w-full leading-normal">
-                    <thead>
-                        <tr>
-                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                                Name
-                            </th>
-                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                                Contact Info
-                            </th>
-                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                                Service
-                            </th>
-                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                                Message
-                            </th>
-                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                                Date
-                            </th>
-                            <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                                Status
-                            </th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {"".join([f"""
-                        <tr class="{'bg-gray-50' if i % 2 == 0 else 'bg-white'}">
-                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
-                                <p class="text-gray-900 whitespace-nowrap">{sub['first_name']} {sub['last_name']}</p>
-                            </td>
-                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
-                                <p class="text-gray-600">{sub['email']}</p>
-                                <p class="text-gray-600">{sub.get('phone', 'N/A')}</p>
-                            </td>
-                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
-                                <p class="text-gray-900 whitespace-nowrap">{sub['service']}</p>
-                            </td>
-                            <td class="px-5 py-5 border-b border-gray-200 text-sm max-w-xs">
-                                <p class="text-gray-900 truncate" title="{sub['message']}">{sub['message'][:50]}...</p>
-                            </td>
-                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
-                                <p class="text-gray-600 whitespace-nowrap">{sub['created_at'].strftime('%Y-%m-%d %H:%M')}</p>
-                            </td>
-                            <td class="px-5 py-5 border-b border-gray-200 text-sm">
-                                <span class="relative inline-block px-3 py-1 font-semibold leading-tight 
-                                    {'text-green-900 bg-green-200' if sub.get('is_read', False) else 'text-orange-900 bg-orange-200'}">
-                                    <span class="relative">{'Read' if sub.get('is_read', False) else 'Unread'}</span>
-                                </span>
-                            </td>
-                        </tr>
-                        """ for i, sub in enumerate(submissions)])}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-
-    return HTMLResponse(content=html_content)
+# @app.get("/admin/contact-submissions", response_class=HTMLResponse)
+# async def view_contact_submissions(admin_user: User = Depends(get_admin_user)):
+#     submissions = list(db.contact_submissions.find().sort("created_at", -1))
+#
+#     html_content = f"""
+#     <!DOCTYPE html>
+#     <html lang="en">
+#     <head>
+#         <meta charset="UTF-8">
+#         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+#         <title>Contact Submissions</title>
+#         <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+#         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+#     </head>
+#     <body class="bg-gray-100">
+#         <div class="container mx-auto px-4 py-8">
+#             <h1 class="text-3xl font-bold text-gray-800 mb-8">Contact Form Submissions</h1>
+#
+#             <div class="bg-white shadow-md rounded-lg overflow-hidden">
+#                 <table class="min-w-full leading-normal">
+#                     <thead>
+#                         <tr>
+#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+#                                 Name
+#                             </th>
+#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+#                                 Contact Info
+#                             </th>
+#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+#                                 Service
+#                             </th>
+#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+#                                 Message
+#                             </th>
+#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+#                                 Date
+#                             </th>
+#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+#                                 Status
+#                             </th>
+#                         </tr>
+#                     </thead>
+#                     <tbody>
+#                         {"".join([f"""
+#                         <tr class="{'bg-gray-50' if i % 2 == 0 else 'bg-white'}">
+#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
+#                                 <p class="text-gray-900 whitespace-nowrap">{sub['first_name']} {sub['last_name']}</p>
+#                             </td>
+#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
+#                                 <p class="text-gray-600">{sub['email']}</p>
+#                                 <p class="text-gray-600">{sub.get('phone', 'N/A')}</p>
+#                             </td>
+#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
+#                                 <p class="text-gray-900 whitespace-nowrap">{sub['service']}</p>
+#                             </td>
+#                             <td class="px-5 py-5 border-b border-gray-200 text-sm max-w-xs">
+#                                 <p class="text-gray-900 truncate" title="{sub['message']}">{sub['message'][:50]}...</p>
+#                             </td>
+#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
+#                                 <p class="text-gray-600 whitespace-nowrap">{sub['created_at'].strftime('%Y-%m-%d %H:%M')}</p>
+#                             </td>
+#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
+#                                 <span class="relative inline-block px-3 py-1 font-semibold leading-tight
+#                                     {'text-green-900 bg-green-200' if sub.get('is_read', False) else 'text-orange-900 bg-orange-200'}">
+#                                     <span class="relative">{'Read' if sub.get('is_read', False) else 'Unread'}</span>
+#                                 </span>
+#                             </td>
+#                         </tr>
+#                         """ for i, sub in enumerate(submissions)])}
+#                     </tbody>
+#                 </table>
+#             </div>
+#         </div>
+#     </body>
+#     </html>
+#     """
+#
+#     return HTMLResponse(content=html_content)
 
 
 # Mark submission as read
