@@ -147,7 +147,7 @@ def parse_json(data):
 
 
 # Mount static files (create a 'static' directory in your project)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.post("/contact", status_code=status.HTTP_201_CREATED)
