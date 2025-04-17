@@ -150,6 +150,7 @@ def parse_json(data):
 # app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+
 @app.post("/contact", status_code=status.HTTP_201_CREATED)
 async def submit_contact_form(contact: ContactForm):
     # Save to database
