@@ -19,16 +19,46 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import json
-from models import (
-    UserCreate, User, UserInDB, UserLogin, Token, TokenData,
-    UserUpdate, UserResponse, ContactForm,
-    BlogPostCreate, BlogPost, BlogPostUpdate, BlogPostResponse,
-    CourseCreate, Course, CourseUpdate, CourseResponse,
-    ClassCreate, ClassUpdate, ClassResponse,
-    AssignmentCreate, Assignment, AssignmentUpdate, AssignmentResponse,
-    CommentCreate, Comment,
-    ResourceCreate, ResourceUpdate, ResourceResponse, JobCategoryCreate, JobApplicationCreate, JobListingCreate, JobCategory, JobListingResponse, JobApplicationResponse, JobListing, JobCategoryBase, JobApplicationBase, JobApplication, JobListingBase, JobLocation, JobListingUpdate, JobCategoryUpdate, JobApplicationUpdate
-)
+import warnings
+
+# Suppress passlib warnings
+warnings.filterwarnings("ignore", message=".*trapped.*")
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# Import models (assuming models.py exists)
+try:
+    from models import (
+        UserCreate, User, UserInDB, UserLogin, Token, TokenData,
+        UserUpdate, UserResponse, ContactForm,
+        BlogPostCreate, BlogPost, BlogPostUpdate, BlogPostResponse,
+        CourseCreate, Course, CourseUpdate, CourseResponse,
+        ClassCreate, ClassUpdate, ClassResponse,
+        AssignmentCreate, Assignment, AssignmentUpdate, AssignmentResponse,
+        CommentCreate, Comment,
+        ResourceCreate, ResourceUpdate, ResourceResponse, JobCategoryCreate, 
+        JobApplicationCreate, JobListingCreate, JobCategory, JobListingResponse, 
+        JobApplicationResponse, JobListing, JobCategoryBase, JobApplicationBase, 
+        JobApplication, JobListingBase, JobLocation, JobListingUpdate, 
+        JobCategoryUpdate, JobApplicationUpdate
+    )
+except ImportError:
+    # Fallback to inline definitions if models.py doesn't exist
+    class UserCreate(BaseModel):
+        email: str
+        password: str
+        first_name: str
+        last_name: str
+        role: str = "student"
+    
+    class User(BaseModel):
+        id: str
+        email: str
+        first_name: str
+        last_name: str
+        role: str
+        disabled: bool = False
+        
+    # Add other model definitions as needed...
 
 # Load environment variables
 load_dotenv()
@@ -69,11 +99,22 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Helper functions
 def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception as e:
+        print(f"Password verification warning: {e}")
+        return False
 
 
 def get_password_hash(password):
-    return pwd_context.hash(password)
+    try:
+        return pwd_context.hash(password)
+    except Exception as e:
+        print(f"Password hashing warning: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Password hashing service temporarily unavailable"
+        )
 
 
 def get_user(email: str):
@@ -150,7 +191,6 @@ def parse_json(data):
 # app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-
 @app.post("/contact", status_code=status.HTTP_201_CREATED)
 async def submit_contact_form(contact: ContactForm):
     # Save to database
@@ -162,9 +202,6 @@ async def submit_contact_form(contact: ContactForm):
     db.contact_submissions.insert_one(contact_data)
 
     return {"message": "Thank you for your message. We'll get back to you soon!"}
-
-
-
 
 
 # Authentication endpoints
@@ -488,12 +525,13 @@ async def get_job_listings(
         "skip": skip,
         "limit": limit,
         "filters": {
-                       "categories": parse_json(categories),
-                       "locations": parse_json(locations),
-                       "employment_types": parse_json(employment_types),
-                       "experience_levels": parse_json(experience_levels)
-                   }
+            "categories": parse_json(categories),
+            "locations": parse_json(locations),
+            "employment_types": parse_json(employment_types),
+            "experience_levels": parse_json(experience_levels)
+        }
     }
+
 
 @app.get("/careers/jobs/{job_id}", response_model=Dict[str, Any])
 async def get_job_listing(job_id: str):
@@ -532,6 +570,7 @@ async def get_job_listing(job_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/careers/categories", response_model=List[Dict[str, Any]])
 async def get_job_categories():
     categories = list(db.job_categories.find().sort("name", 1))
@@ -545,12 +584,13 @@ async def get_job_categories():
 
     return parse_json(categories)
 
+
 # User Job Application Endpoints
 @app.post("/careers/jobs/{job_id}/apply", response_model=JobApplicationResponse)
 async def apply_for_job(
-    job_id: str,
-    application: JobApplicationCreate,
-    current_user: User = Depends(get_current_active_user)):
+        job_id: str,
+        application: JobApplicationCreate,
+        current_user: User = Depends(get_current_active_user)):
     # Check if job exists and is published
     job = db.job_listings.find_one({"_id": ObjectId(job_id), "is_published": True})
     if not job:
@@ -611,6 +651,7 @@ async def apply_for_job(
 
     return parse_json(created_application)
 
+
 @app.get("/careers/applications", response_model=Dict[str, Any])
 async def get_user_applications(
         current_user: User = Depends(get_current_active_user),
@@ -649,6 +690,7 @@ async def get_user_applications(
         "limit": limit
     }
 
+
 @app.get("/careers/applications/{application_id}", response_model=JobApplicationResponse)
 async def get_application_details(
         application_id: str,
@@ -669,6 +711,7 @@ async def get_application_details(
         application["job"] = parse_json(job)
 
     return parse_json(application)
+
 
 @app.delete("/careers/applications/{application_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def withdraw_application(
@@ -702,6 +745,7 @@ async def withdraw_application(
 
     return None
 
+
 # Resume upload endpoint
 @app.post("/careers/upload/resume")
 async def upload_resume(
@@ -733,6 +777,7 @@ async def upload_resume(
         return {"url": result["secure_url"]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # Dashboard endpoints
 @app.get("/dashboard/overview", response_model=Dict[str, Any])
@@ -1621,11 +1666,12 @@ async def admin_get_job_listings(
         "limit": limit
     }
 
+
 @app.post("/admin/careers/jobs", response_model=JobListingResponse)
 async def admin_create_job_listing(
         job: JobListingCreate,
         admin_user: User = Depends(get_admin_user)
-    ):
+):
     # Prepare job data
     job_data = job.dict()
     job_data["created_by"] = ObjectId(admin_user.id)
@@ -1640,6 +1686,7 @@ async def admin_create_job_listing(
     # Return created job
     created_job = db.job_listings.find_one({"_id": result.inserted_id})
     return parse_json(created_job)
+
 
 @app.put("/admin/careers/jobs/{job_id}", response_model=JobListingResponse)
 async def admin_update_job_listing(
@@ -1665,6 +1712,7 @@ async def admin_update_job_listing(
     updated_job = db.job_listings.find_one({"_id": ObjectId(job_id)})
     return parse_json(updated_job)
 
+
 @app.delete("/admin/careers/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_job_listing(
         job_id: str,
@@ -1682,6 +1730,7 @@ async def admin_delete_job_listing(
     db.job_applications.delete_many({"job_id": ObjectId(job_id)})
 
     return None
+
 
 @app.get("/admin/careers/applications", response_model=Dict[str, Any])
 async def admin_get_job_applications(
@@ -1764,6 +1813,7 @@ async def admin_get_application_details(
 
         return parse_json(application)
 
+
 @app.put("/admin/careers/applications/{application_id}", response_model=JobApplicationResponse)
 async def admin_update_application_status(
         application_id: str,
@@ -1807,6 +1857,7 @@ async def admin_update_application_status(
 
         return parse_json(updated_application)
 
+
 @app.post("/admin/careers/categories", response_model=JobCategory)
 async def admin_create_job_category(
         category: JobCategoryCreate,
@@ -1832,6 +1883,7 @@ async def admin_create_job_category(
     # Return created category
     created_category = db.job_categories.find_one({"_id": result.inserted_id})
     return parse_json(created_category)
+
 
 @app.put("/admin/careers/categories/{category_id}", response_model=JobCategory)
 async def admin_update_job_category(
@@ -1869,6 +1921,7 @@ async def admin_update_job_category(
 
     return parse_json(updated_category)
 
+
 @app.delete("/admin/careers/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_job_category(
         category_id: str,
@@ -1892,10 +1945,10 @@ async def admin_delete_job_category(
 
     return None
 
+
+# FIXED: /admin/careers/stats endpoint
 @app.get("/admin/careers/stats", response_model=Dict[str, Any])
-async def admin_get_careers_stats(
-                admin_user: User = Depends(get_admin_user)
-):
+async def admin_get_careers_stats(admin_user: User = Depends(get_admin_user)):
     # Get job statistics
     total_jobs = db.job_listings.count_documents({})
     published_jobs = db.job_listings.count_documents({"is_published": True})
@@ -1904,8 +1957,7 @@ async def admin_get_careers_stats(
     # Get application statistics
     total_applications = db.job_applications.count_documents({})
     applications_by_status = list(db.job_applications.aggregate([
-        {"$group": {"_id": "$status",
-        "count": {"$sum": 1}}},
+        {"$group": {"_id": "$status", "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}}
     ]))
 
@@ -1939,32 +1991,33 @@ async def admin_get_careers_stats(
                 "email": user.get("email", "")
             }
 
-            # Get top viewed jobs
-            top_viewed_jobs = list(db.job_listings.find().sort("views", -1).limit(5))
+    # Get top viewed jobs
+    top_viewed_jobs = list(db.job_listings.find().sort("views", -1).limit(5))
 
-            # Get jobs with most applications
-            top_applied_jobs = list(db.job_listings.find().sort("applications_count", -1).limit(5))
+    # Get jobs with most applications
+    top_applied_jobs = list(db.job_listings.find().sort("applications_count", -1).limit(5))
 
-            return {
-                "job_stats": {
-                    "total": total_jobs,
-                    "published": published_jobs,
-                    "featured": featured_jobs
-                },
-                "application_stats": {
-                    "total": total_applications,
-                    "by_status": parse_json(applications_by_status)
-                },
-                "categories": parse_json(categories),
-                "recent_activity": {
-                    "jobs": parse_json(recent_jobs),
-                    "applications": parse_json(recent_applications)
-                },
-                "top_jobs": {
-                    "by_views": parse_json(top_viewed_jobs),
-                    "by_applications": parse_json(top_applied_jobs)
-                }
-            }
+    return {
+        "job_stats": {
+            "total": total_jobs,
+            "published": published_jobs,
+            "featured": featured_jobs
+        },
+        "application_stats": {
+            "total": total_applications,
+            "by_status": parse_json(applications_by_status)
+        },
+        "categories": parse_json(categories),
+        "recent_activity": {
+            "jobs": parse_json(recent_jobs),
+            "applications": parse_json(recent_applications)
+        },
+        "top_jobs": {
+            "by_views": parse_json(top_viewed_jobs),
+            "by_applications": parse_json(top_applied_jobs)
+        }
+    }
+
 
 # Class Management
 @app.get("/admin/classes", response_model=Dict[str, Any])
@@ -2485,88 +2538,6 @@ async def get_admin_dashboard_stats(
 
 
 # Admin Contact Submissions Template
-# @app.get("/admin/contact-submissions", response_class=HTMLResponse)
-# async def view_contact_submissions(admin_user: User = Depends(get_admin_user)):
-#     submissions = list(db.contact_submissions.find().sort("created_at", -1))
-#
-#     html_content = f"""
-#     <!DOCTYPE html>
-#     <html lang="en">
-#     <head>
-#         <meta charset="UTF-8">
-#         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-#         <title>Contact Submissions</title>
-#         <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-#         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-#     </head>
-#     <body class="bg-gray-100">
-#         <div class="container mx-auto px-4 py-8">
-#             <h1 class="text-3xl font-bold text-gray-800 mb-8">Contact Form Submissions</h1>
-#
-#             <div class="bg-white shadow-md rounded-lg overflow-hidden">
-#                 <table class="min-w-full leading-normal">
-#                     <thead>
-#                         <tr>
-#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-#                                 Name
-#                             </th>
-#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-#                                 Contact Info
-#                             </th>
-#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-#                                 Service
-#                             </th>
-#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-#                                 Message
-#                             </th>
-#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-#                                 Date
-#                             </th>
-#                             <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-#                                 Status
-#                             </th>
-#                         </tr>
-#                     </thead>
-#                     <tbody>
-#                         {"".join([f"""
-#                         <tr class="{'bg-gray-50' if i % 2 == 0 else 'bg-white'}">
-#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
-#                                 <p class="text-gray-900 whitespace-nowrap">{sub['first_name']} {sub['last_name']}</p>
-#                             </td>
-#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
-#                                 <p class="text-gray-600">{sub['email']}</p>
-#                                 <p class="text-gray-600">{sub.get('phone', 'N/A')}</p>
-#                             </td>
-#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
-#                                 <p class="text-gray-900 whitespace-nowrap">{sub['service']}</p>
-#                             </td>
-#                             <td class="px-5 py-5 border-b border-gray-200 text-sm max-w-xs">
-#                                 <p class="text-gray-900 truncate" title="{sub['message']}">{sub['message'][:50]}...</p>
-#                             </td>
-#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
-#                                 <p class="text-gray-600 whitespace-nowrap">{sub['created_at'].strftime('%Y-%m-%d %H:%M')}</p>
-#                             </td>
-#                             <td class="px-5 py-5 border-b border-gray-200 text-sm">
-#                                 <span class="relative inline-block px-3 py-1 font-semibold leading-tight
-#                                     {'text-green-900 bg-green-200' if sub.get('is_read', False) else 'text-orange-900 bg-orange-200'}">
-#                                     <span class="relative">{'Read' if sub.get('is_read', False) else 'Unread'}</span>
-#                                 </span>
-#                             </td>
-#                         </tr>
-#                         """ for i, sub in enumerate(submissions)])}
-#                     </tbody>
-#                 </table>
-#             </div>
-#         </div>
-#     </body>
-#     </html>
-#     """
-#
-#     return HTMLResponse(content=html_content)
-
-
-# Mark submission as read
-# Get single submission
 @app.get("/admin/contact-submissions/{submission_id}")
 async def get_contact_submission(
         submission_id: str,
@@ -2598,7 +2569,7 @@ async def mark_submission_read(
 
 # Contact Form REST API for Admin
 
-@app.get("/admin/contact-submissions/list/", response_model=Dict[str, Any])
+@app.get("/admin/contact-submissions/list/", response_model=Dict[str, Any], operation_id="get_all_contact_submissions")
 async def get_all_contact_submissions(
         admin_user: User = Depends(get_admin_user),
         skip: int = Query(0, ge=0),
@@ -2659,7 +2630,7 @@ async def get_all_contact_submissions(
 
 
 @app.get("/admin/contact-submissions/{submission_id}", response_model=Dict[str, Any])
-async def get_contact_submission(
+async def get_contact_submission_details(
         submission_id: str,
         admin_user: User = Depends(get_admin_user)
 ):
@@ -2684,7 +2655,7 @@ async def get_contact_submission(
 
 
 @app.put("/admin/contact-submissions/{submission_id}/read", status_code=status.HTTP_200_OK)
-async def mark_submission_read(
+async def mark_submission_read_endpoint(
         submission_id: str,
         admin_user: User = Depends(get_admin_user)
 ):
@@ -2735,5 +2706,3 @@ async def delete_submission(
         raise HTTPException(status_code=404, detail="Submission not found")
 
     return {"success": True, "message": "Submission deleted"}
-
-
