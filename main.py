@@ -1784,6 +1784,23 @@ async def admin_get_job_applications(
     }
 
 
+@app.get("/admin/careers/categories", response_model=List[Dict[str, Any]])
+async def admin_get_job_categories(
+        admin_user: User = Depends(get_admin_user)
+):
+    """
+    Get all job categories with their job counts
+    """
+    categories = list(db.job_categories.find().sort("name", 1))
+    
+    # Add job count to each category
+    for category in categories:
+        job_count = db.job_listings.count_documents({"category": category["name"]})
+        category["job_count"] = job_count
+    
+    return parse_json(categories)
+
+
 @app.get("/admin/careers/applications/{application_id}", response_model=JobApplicationResponse)
 async def admin_get_application_details(
         application_id: str,
