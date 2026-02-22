@@ -1,22 +1,8 @@
-from pydantic import BaseModel, Field, EmailStr, GetJsonSchemaHandler, BeforeValidator
+from pydantic import BaseModel, Field, EmailStr, BeforeValidator
 from typing import List, Dict, Any, Optional, Annotated
 from datetime import datetime
 from bson import ObjectId
-from pydantic.json_schema import JsonSchemaValue
-from pydantic_core import CoreSchema, PydanticCustomError, core_schema
 
-
-
-# class PyObjectId(ObjectId):
-#     @classmethod
-#     def __get_validators__(cls):
-#         yield cls.validate
-#
-#     @classmethod
-#     def validate(cls, v):
-#         if not isinstance(v, ObjectId):
-#             raise ValueError("Not a valid ObjectId")
-#         return str(v)
 
 def validate_objectid(value: str) -> str:
     if not ObjectId.is_valid(value):
@@ -24,6 +10,7 @@ def validate_objectid(value: str) -> str:
     return value
 
 PyObjectId = Annotated[str, BeforeValidator(validate_objectid)]
+
 
 # User models
 class UserBase(BaseModel):
@@ -166,6 +153,7 @@ class JobLocation(BaseModel):
     remote: bool = False
     hybrid: bool = False
 
+
 class JobListingBase(BaseModel):
     title: str
     company: str
@@ -188,8 +176,10 @@ class JobListingBase(BaseModel):
     is_featured: bool = False
     is_published: bool = True
 
+
 class JobListingCreate(JobListingBase):
     pass
+
 
 class JobListingUpdate(BaseModel):
     title: Optional[str] = None
@@ -213,6 +203,7 @@ class JobListingUpdate(BaseModel):
     is_featured: Optional[bool] = None
     is_published: Optional[bool] = None
 
+
 class JobListing(JobListingBase):
     id: Optional[PyObjectId] = Field(alias="_id")
     created_by: Optional[PyObjectId] = None
@@ -221,16 +212,23 @@ class JobListing(JobListingBase):
     views: int = 0
     applications_count: int = 0
 
-    class Config:
-        arbitrary_types_allowed = True
-        json_encoders = {
-            ObjectId: str
-        }
+    model_config = {
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str}
+    }
+
 
 class JobListingResponse(JobListing):
     created_by_user: Optional[Dict[str, Any]] = None
 
+
 class JobApplicationBase(BaseModel):
+    # Personal Information (Now stored directly in the application)
+    first_name: str
+    last_name: str
+    email: EmailStr
+    
+    # Application Details
     job_id: str
     cover_letter: Optional[str] = None
     resume_url: str
@@ -240,17 +238,20 @@ class JobApplicationBase(BaseModel):
     referral: Optional[str] = None
     additional_info: Optional[str] = None
 
+
 class JobApplicationCreate(JobApplicationBase):
     pass
+
 
 class JobApplicationUpdate(BaseModel):
     status: Optional[str] = None  # applied, reviewed, interview, rejected, hired
     admin_notes: Optional[str] = None
     interview_date: Optional[datetime] = None
 
+
 class JobApplication(JobApplicationBase):
     id: Optional[PyObjectId] = Field(alias="_id")
-    user_id: PyObjectId
+    # user_id is removed - no longer linking to user account
     job_id: PyObjectId
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -258,28 +259,32 @@ class JobApplication(JobApplicationBase):
     admin_notes: Optional[str] = None
     interview_date: Optional[datetime] = None
 
-    class Config:
-        arbitrary_types_allowed = True
-        json_encoders = {
-            ObjectId: str
-        }
+    model_config = {
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str}
+    }
+
 
 class JobApplicationResponse(JobApplication):
-    user: Optional[Dict[str, Any]] = None
+    # user field is removed - no longer linking to user account
     job: Optional[Dict[str, Any]] = None
+
 
 class JobCategoryBase(BaseModel):
     name: str
     description: Optional[str] = None
     icon: Optional[str] = None
 
+
 class JobCategoryCreate(JobCategoryBase):
     pass
+
 
 class JobCategoryUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     icon: Optional[str] = None
+
 
 class JobCategory(JobCategoryBase):
     id: Optional[PyObjectId] = Field(alias="_id")
@@ -287,11 +292,10 @@ class JobCategory(JobCategoryBase):
     updated_at: Optional[datetime] = None
     job_count: int = 0
 
-    class Config:
-        arbitrary_types_allowed = True
-        json_encoders = {
-            ObjectId: str
-        }
+    model_config = {
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str}
+    }
 
 
 # Course models
@@ -447,17 +451,6 @@ class ResourceUpdate(BaseModel):
     level: Optional[str] = None
     category: Optional[str] = None
 
-
-# class ResourceResponse(ResourceBase):
-#     id: Optional[PyObjectId] = Field(alias="_id")
-#     created_at: Optional[datetime] = None
-#     updated_at: Optional[datetime] = None
-#     created_by: Optional[PyObjectId] = None
-#
-#     model_config = {
-#         "arbitrary_types_allowed": True,
-#         "json_encoders": {ObjectId: str, datetime: lambda dt: dt.isoformat()}
-#     }
 
 class ResourceResponse(BaseModel):
     id: Optional[PyObjectId] = Field(alias="_id")
