@@ -13,52 +13,32 @@ import cloudinary.uploader
 from pymongo import MongoClient
 from bson import ObjectId
 from pydantic import BaseModel, Field, EmailStr
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import json
 import warnings
+import uuid
 
 # Suppress passlib warnings
 warnings.filterwarnings("ignore", message=".*trapped.*")
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# Import models (assuming models.py exists)
-try:
-    from models import (
-        UserCreate, User, UserInDB, UserLogin, Token, TokenData,
-        UserUpdate, UserResponse, ContactForm,
-        BlogPostCreate, BlogPost, BlogPostUpdate, BlogPostResponse,
-        CourseCreate, Course, CourseUpdate, CourseResponse,
-        ClassCreate, ClassUpdate, ClassResponse,
-        AssignmentCreate, Assignment, AssignmentUpdate, AssignmentResponse,
-        CommentCreate, Comment,
-        ResourceCreate, ResourceUpdate, ResourceResponse, JobCategoryCreate, 
-        JobApplicationCreate, JobListingCreate, JobCategory, JobListingResponse, 
-        JobApplicationResponse, JobListing, JobCategoryBase, JobApplicationBase, 
-        JobApplication, JobListingBase, JobLocation, JobListingUpdate, 
-        JobCategoryUpdate, JobApplicationUpdate
-    )
-except ImportError:
-    # Fallback to inline definitions if models.py doesn't exist
-    class UserCreate(BaseModel):
-        email: str
-        password: str
-        first_name: str
-        last_name: str
-        role: str = "student"
-    
-    class User(BaseModel):
-        id: str
-        email: str
-        first_name: str
-        last_name: str
-        role: str
-        disabled: bool = False
-        
-    # Add other model definitions as needed...
+# Import models
+from models import (
+    UserCreate, User, UserInDB, UserLogin, Token, TokenData,
+    UserUpdate, UserResponse, ContactForm,
+    BlogPostCreate, BlogPost, BlogPostUpdate, BlogPostResponse,
+    CourseCreate, Course, CourseUpdate, CourseResponse,
+    ClassCreate, ClassUpdate, ClassResponse,
+    AssignmentCreate, Assignment, AssignmentUpdate, AssignmentResponse,
+    CommentCreate, Comment,
+    ResourceCreate, ResourceUpdate, ResourceResponse, JobCategoryCreate, 
+    JobApplicationCreate, JobListingCreate, JobCategory, JobListingResponse, 
+    JobApplicationResponse, JobListing, JobCategoryBase, JobApplicationBase, 
+    JobApplication, JobListingBase, JobLocation, JobListingUpdate, 
+    JobCategoryUpdate, JobApplicationUpdate, PyObjectId
+)
 
 # Load environment variables
 load_dotenv()
@@ -69,11 +49,35 @@ app = FastAPI(title="AOCA Resources API", description="API for AOCA Resources Li
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # Add your frontend URLs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
+
+# Exception handlers to ensure CORS headers are included even on errors
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers={
+            "Access-Control-Allow-Origin": "http://localhost:5173",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+        headers={
+            "Access-Control-Allow-Origin": "http://localhost:5173",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
 
 # Configure MongoDB connection
 MONGO_URI = os.getenv("MONGO_URL")
@@ -86,6 +90,13 @@ cloudinary.config(
     api_key=os.getenv("API_KEY"),
     api_secret=os.getenv("API_SECRET")
 )
+
+# Test Cloudinary connection
+try:
+    cloudinary.api.ping()
+    print("Cloudinary connection successful!")
+except Exception as e:
+    print(f"Cloudinary connection failed: {e}")
 
 # Configure JWT
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
@@ -121,7 +132,7 @@ def get_user(email: str):
     user = db.users.find_one({"email": email})
     if user:
         # Convert ObjectId to string
-        user["_id"] = str(user["_id"])  # Ensure _id is converted to string
+        user["_id"] = str(user["_id"])
         return UserInDB(**user)
     return None
 
@@ -185,10 +196,6 @@ async def get_admin_user(current_user: User = Depends(get_current_active_user)):
 # Helper function to convert ObjectId to string
 def parse_json(data):
     return json.loads(json.dumps(data, default=str))
-
-
-# Mount static files (create a 'static' directory in your project)
-# app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.post("/contact", status_code=status.HTTP_201_CREATED)
@@ -585,12 +592,12 @@ async def get_job_categories():
     return parse_json(categories)
 
 
-# User Job Application Endpoints
+# Public Job Application Endpoint (No Authentication Required)
 @app.post("/careers/jobs/{job_id}/apply", response_model=JobApplicationResponse)
 async def apply_for_job(
         job_id: str,
-        application: JobApplicationCreate,
-        current_user: User = Depends(get_current_active_user)):
+        application: JobApplicationCreate
+):
     # Check if job exists and is published
     job = db.job_listings.find_one({"_id": ObjectId(job_id), "is_published": True})
     if not job:
@@ -604,21 +611,20 @@ async def apply_for_job(
                 detail="Application deadline has passed"
             )
 
-    # Check if user has already applied
+    # Optional: Check for duplicate applications by email
     existing_application = db.job_applications.find_one({
-        "user_id": ObjectId(current_user.id),
+        "email": application.email,
         "job_id": ObjectId(job_id)
     })
 
     if existing_application:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You have already applied for this job"
+            detail="You have already applied for this job with this email address"
         )
 
     # Prepare application data
     application_data = application.dict()
-    application_data["user_id"] = ObjectId(current_user.id)
     application_data["job_id"] = ObjectId(job_id)
     application_data["created_at"] = datetime.utcnow()
     application_data["updated_at"] = datetime.utcnow()
@@ -636,121 +642,20 @@ async def apply_for_job(
     # Return created application
     created_application = db.job_applications.find_one({"_id": result.inserted_id})
 
-    # Add job and user info
+    # Add job info
     created_application["job"] = {
         "id": str(job["_id"]),
         "title": job["title"],
         "company": job["company"]
     }
 
-    created_application["user"] = {
-        "id": str(current_user.id),
-        "name": f"{current_user.first_name} {current_user.last_name}",
-        "email": current_user.email
-    }
-
     return parse_json(created_application)
 
 
-@app.get("/careers/applications", response_model=Dict[str, Any])
-async def get_user_applications(
-        current_user: User = Depends(get_current_active_user),
-        skip: int = 0,
-        limit: int = 10,
-        status: Optional[str] = None
-):
-    # Build query
-    query = {"user_id": ObjectId(current_user.id)}
-
-    if status:
-        query["status"] = status
-
-    # Get applications
-    applications = list(db.job_applications.find(query).sort("created_at", -1).skip(skip).limit(limit))
-
-    # Get total count for pagination
-    total = db.job_applications.count_documents(query)
-
-    # Add job info to each application
-    for application in applications:
-        job = db.job_listings.find_one({"_id": application["job_id"]})
-        if job:
-            application["job"] = {
-                "id": str(job["_id"]),
-                "title": job["title"],
-                "company": job["company"],
-                "location": job["location"],
-                "employment_type": job["employment_type"]
-            }
-
-    return {
-        "applications": parse_json(applications),
-        "total": total,
-        "skip": skip,
-        "limit": limit
-    }
-
-
-@app.get("/careers/applications/{application_id}", response_model=JobApplicationResponse)
-async def get_application_details(
-        application_id: str,
-        current_user: User = Depends(get_current_active_user)
-):
-    # Get application
-    application = db.job_applications.find_one({
-        "_id": ObjectId(application_id),
-        "user_id": ObjectId(current_user.id)
-    })
-
-    if not application:
-        raise HTTPException(status_code=404, detail="Application not found")
-
-    # Get job details
-    job = db.job_listings.find_one({"_id": application["job_id"]})
-    if job:
-        application["job"] = parse_json(job)
-
-    return parse_json(application)
-
-
-@app.delete("/careers/applications/{application_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def withdraw_application(
-        application_id: str,
-        current_user: User = Depends(get_current_active_user)
-):
-    # Check if application exists and belongs to user
-    application = db.job_applications.find_one({
-        "_id": ObjectId(application_id),
-        "user_id": ObjectId(current_user.id)
-    })
-
-    if not application:
-        raise HTTPException(status_code=404, detail="Application not found")
-
-    # Check if application can be withdrawn (only if status is 'applied')
-    if application["status"] != "applied":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot withdraw application with status '{application['status']}'"
-        )
-
-    # Delete application
-    db.job_applications.delete_one({"_id": ObjectId(application_id)})
-
-    # Update application count for the job
-    db.job_listings.update_one(
-        {"_id": application["job_id"]},
-        {"$inc": {"applications_count": -1}}
-    )
-
-    return None
-
-
-# Resume upload endpoint
+# Resume upload endpoint (No Authentication Required)
 @app.post("/careers/upload/resume")
 async def upload_resume(
-        file: UploadFile = File(...),
-        current_user: User = Depends(get_current_active_user)
+        file: UploadFile = File(...)
 ):
     try:
         # Check file type
@@ -775,9 +680,10 @@ async def upload_resume(
         
         # Generate a unique public_id
         timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-        public_id = f"resume_{current_user.id}_{timestamp}"
+        unique_id = str(uuid.uuid4())[:8]
+        public_id = f"resume_{timestamp}_{unique_id}"
         
-        # Upload to Cloudinary - try different approaches
+        # Upload to Cloudinary
         try:
             # First attempt: Upload as raw file with explicit resource_type
             result = cloudinary.uploader.upload(
@@ -801,7 +707,6 @@ async def upload_resume(
         raise
     except Exception as e:
         print(f"Upload error: {str(e)}")
-        # Log the full error for debugging
         import traceback
         traceback.print_exc()
         raise HTTPException(
@@ -809,7 +714,8 @@ async def upload_resume(
             detail=f"Error uploading file: {str(e)}"
         )
 
-# Dashboard endpoints
+
+# Dashboard endpoints (Require Authentication)
 @app.get("/dashboard/overview", response_model=Dict[str, Any])
 async def get_dashboard_overview(current_user: User = Depends(get_current_active_user)):
     # Get user's courses
@@ -938,134 +844,6 @@ async def get_user_classes(
             }
 
     return parse_json(classes)
-
-
-# Add this endpoint to get students enrolled in a course
-@app.get("/admin/courses/{course_id}/students", response_model=Dict[str, Any])
-async def get_course_students(
-        course_id: str,
-        skip: int = 0,
-        limit: int = 100,
-        admin_user: User = Depends(get_admin_user)
-):
-    """
-    Get all students enrolled in a specific course with pagination.
-    Returns student details along with enrollment information.
-    """
-    # Check if course exists
-    course = db.courses.find_one({"_id": ObjectId(course_id)})
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-
-    # Get enrollments for this course
-    enrollments = list(db.user_courses.find(
-        {"course_id": ObjectId(course_id)}
-    ).skip(skip).limit(limit))
-
-    # Get total count for pagination
-    total = db.user_courses.count_documents({"course_id": ObjectId(course_id)})
-
-    # Get student details for each enrollment
-    student_ids = [enrollment["user_id"] for enrollment in enrollments]
-    students = list(db.users.find({"_id": {"$in": student_ids}}))
-
-    # Format response
-    formatted_students = []
-    for student in students:
-        # Find the corresponding enrollment
-        enrollment = next(
-            (e for e in enrollments if str(e["user_id"]) == str(student["_id"])),
-            None
-        )
-
-        formatted_students.append({
-            "id": str(student["_id"]),
-            "name": f"{student.get('first_name', '')} {student.get('last_name', '')}",
-            "email": student.get("email", ""),
-            "role": student.get("role", ""),
-            "image": student.get("image", ""),
-            "enrollment_date": enrollment["enrolled_at"] if enrollment else None,
-            "enrollment_status": enrollment["status"] if enrollment else None
-        })
-
-    return {
-        "students": parse_json(formatted_students),
-        "total": total,
-        "skip": skip,
-        "limit": limit,
-        "course": {
-            "id": str(course["_id"]),
-            "name": course["name"],
-            "level": course["level"]
-        }
-    }
-
-
-# Add this endpoint to get a class by ID
-@app.get("/admin/classes/{class_id}", response_model=Dict[str, Any])
-async def get_class_by_id(
-        class_id: str,
-        admin_user: User = Depends(get_admin_user)
-):
-    """
-    Get detailed information about a specific class including:
-    - Class details
-    - Course information
-    - Instructor information
-    - List of enrolled students
-    """
-    # Get the class
-    class_data = db.classes.find_one({"_id": ObjectId(class_id)})
-    if not class_data:
-        raise HTTPException(status_code=404, detail="Class not found")
-
-    # Get course information
-    course = db.courses.find_one({"_id": class_data["course_id"]})
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-
-    # Get instructor information if available
-    instructor = None
-    if "instructor_id" in class_data and class_data["instructor_id"]:
-        instructor = db.users.find_one({"_id": class_data["instructor_id"]})
-
-    # Get enrolled students
-    enrollments = list(db.user_courses.find({"course_id": class_data["course_id"]}))
-    student_ids = [enrollment["user_id"] for enrollment in enrollments]
-    students = list(db.users.find({"_id": {"$in": student_ids}}))
-
-    # Format student data
-    formatted_students = []
-    for student in students:
-        formatted_students.append({
-            "id": str(student["_id"]),
-            "name": f"{student.get('first_name', '')} {student.get('last_name', '')}",
-            "email": student.get("email", ""),
-            "image": student.get("image", "")
-        })
-
-    # Format response
-    response = {
-        "class": parse_json(class_data),
-        "course": {
-            "id": str(course["_id"]),
-            "name": course["name"],
-            "description": course.get("description", ""),
-            "level": course.get("level", "")
-        },
-        "instructor": None,
-        "students": formatted_students
-    }
-
-    if instructor:
-        response["instructor"] = {
-            "id": str(instructor["_id"]),
-            "name": f"{instructor.get('first_name', '')} {instructor.get('last_name', '')}",
-            "email": instructor.get("email", ""),
-            "image": instructor.get("image", "")
-        }
-
-    return response
 
 
 @app.get("/dashboard/resources", response_model=List[Dict[str, Any]])
@@ -1562,10 +1340,6 @@ async def create_blog_category(
         category_data: dict,
         admin_user: User = Depends(get_admin_user)
 ):
-    # This endpoint doesn't actually create a category document
-    # since categories are just fields in blog posts
-    # It's more of a validation endpoint to ensure consistent category naming
-
     category_name = category_data.get("name")
     if not category_name:
         raise HTTPException(
@@ -1579,7 +1353,6 @@ async def create_blog_category(
         return {"message": "Category already exists", "name": category_name}
 
     # Create a dummy post with this category to make it available
-    # This is optional and can be removed if not needed
     dummy_post = {
         "title": f"Category: {category_name}",
         "slug": f"category-{category_name.lower().replace(' ', '-')}",
@@ -1590,8 +1363,8 @@ async def create_blog_category(
         "author_id": ObjectId(admin_user.id),
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
-        "is_published": False,  # Mark as unpublished
-        "is_placeholder": True  # Mark as placeholder
+        "is_published": False,
+        "is_placeholder": True
     }
 
     db.blog_posts.insert_one(dummy_post)
@@ -1780,13 +1553,20 @@ async def admin_get_job_applications(
     if status:
         query["status"] = status
 
+    if search:
+        query["$or"] = [
+            {"first_name": {"$regex": search, "$options": "i"}},
+            {"last_name": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}}
+        ]
+
     # Get applications
     applications = list(db.job_applications.find(query).sort("created_at", -1).skip(skip).limit(limit))
 
     # Get total count for pagination
     total = db.job_applications.count_documents(query)
 
-    # Add job and user info to each application
+    # Add job info to each application
     for application in applications:
         # Get job info
         job = db.job_listings.find_one({"_id": application["job_id"]})
@@ -1795,15 +1575,6 @@ async def admin_get_job_applications(
                 "id": str(job["_id"]),
                 "title": job["title"],
                 "company": job["company"]
-            }
-
-        # Get user info
-        user = db.users.find_one({"_id": application["user_id"]})
-        if user:
-            application["user"] = {
-                "id": str(user["_id"]),
-                "name": f"{user.get('first_name', '')} {user.get('last_name', '')}",
-                "email": user.get("email", "")
             }
 
     return {
@@ -1845,20 +1616,8 @@ async def admin_get_application_details(
     job = db.job_listings.find_one({"_id": application["job_id"]})
     if job:
         application["job"] = parse_json(job)
-        # Get user details
-        user = db.users.find_one({"_id": application["user_id"]})
-        if user:
-            application["user"] = {
-                "id": str(user["_id"]),
-                "name": f"{user.get('first_name', '')} {user.get('last_name', '')}",
-                "email": user.get("email", ""),
-                "phone": user.get("phone", ""),
-                "address": user.get("address", ""),
-                "bio": user.get("bio", ""),
-                "image": user.get("image", "")
-            }
 
-        return parse_json(application)
+    return parse_json(application)
 
 
 @app.put("/admin/careers/applications/{application_id}", response_model=JobApplicationResponse)
@@ -1893,16 +1652,7 @@ async def admin_update_application_status(
             "company": job["company"]
         }
 
-        # Get user details
-        user = db.users.find_one({"_id": updated_application["user_id"]})
-        if user:
-            updated_application["user"] = {
-                "id": str(user["_id"]),
-                "name": f"{user.get('first_name', '')} {user.get('last_name', '')}",
-                "email": user.get("email", "")
-            }
-
-        return parse_json(updated_application)
+    return parse_json(updated_application)
 
 
 @app.post("/admin/careers/categories", response_model=JobCategory)
@@ -1993,7 +1743,7 @@ async def admin_delete_job_category(
     return None
 
 
-# FIXED: /admin/careers/stats endpoint
+# Admin Careers Stats
 @app.get("/admin/careers/stats", response_model=Dict[str, Any])
 async def admin_get_careers_stats(admin_user: User = Depends(get_admin_user)):
     # Get job statistics
@@ -2018,7 +1768,7 @@ async def admin_get_careers_stats(admin_user: User = Depends(get_admin_user)):
     recent_jobs = list(db.job_listings.find().sort("created_at", -1).limit(5))
     recent_applications = list(db.job_applications.find().sort("created_at", -1).limit(5))
 
-    # Add job and user info to recent applications
+    # Add job info to recent applications
     for application in recent_applications:
         # Get job info
         job = db.job_listings.find_one({"_id": application["job_id"]})
@@ -2027,15 +1777,6 @@ async def admin_get_careers_stats(admin_user: User = Depends(get_admin_user)):
                 "id": str(job["_id"]),
                 "title": job["title"],
                 "company": job["company"]
-            }
-
-        # Get user info
-        user = db.users.find_one({"_id": application["user_id"]})
-        if user:
-            application["user"] = {
-                "id": str(user["_id"]),
-                "name": f"{user.get('first_name', '')} {user.get('last_name', '')}",
-                "email": user.get("email", "")
             }
 
     # Get top viewed jobs
@@ -2615,7 +2356,6 @@ async def mark_submission_read(
 
 
 # Contact Form REST API for Admin
-
 @app.get("/admin/contact-submissions/list/", response_model=Dict[str, Any], operation_id="get_all_contact_submissions")
 async def get_all_contact_submissions(
         admin_user: User = Depends(get_admin_user),
