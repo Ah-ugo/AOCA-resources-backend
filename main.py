@@ -765,18 +765,25 @@ async def upload_resume(
 
         # Read file content
         contents = await file.read()
-
-        # Upload to Cloudinary with resource type 'raw' for documents
+        
+        # Upload to Cloudinary with correct parameters for raw files
+        # Use upload with resource_type="raw" and pass the file content
         result = cloudinary.uploader.upload(
             contents,
             resource_type="raw",
             folder="resumes",
-            public_id=f"{current_user.id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            public_id=f"{current_user.id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+            format=file_ext[1:]  # Remove the dot from extension
         )
 
         return {"url": result["secure_url"]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log the error for debugging
+        print(f"Upload error: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error uploading file: {str(e)}"
+        )
 
 
 # Dashboard endpoints
