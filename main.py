@@ -766,25 +766,48 @@ async def upload_resume(
         # Read file content
         contents = await file.read()
         
-        # Upload to Cloudinary with correct parameters for raw files
-        # Use upload with resource_type="raw" and pass the file content
-        result = cloudinary.uploader.upload(
-            contents,
-            resource_type="raw",
-            folder="resumes",
-            public_id=f"{current_user.id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-            format=file_ext[1:]  # Remove the dot from extension
-        )
+        # Check file size (limit to 5MB)
+        if len(contents) > 5 * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File too large. Maximum size is 5MB"
+            )
+        
+        # Generate a unique public_id
+        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        public_id = f"resume_{current_user.id}_{timestamp}"
+        
+        # Upload to Cloudinary - try different approaches
+        try:
+            # First attempt: Upload as raw file with explicit resource_type
+            result = cloudinary.uploader.upload(
+                contents,
+                resource_type="raw",
+                folder="resumes",
+                public_id=public_id
+            )
+        except Exception as e:
+            print(f"First upload attempt failed: {str(e)}")
+            # Second attempt: Let Cloudinary auto-detect the type
+            result = cloudinary.uploader.upload(
+                contents,
+                folder="resumes",
+                public_id=public_id
+            )
 
         return {"url": result["secure_url"]}
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        # Log the error for debugging
         print(f"Upload error: {str(e)}")
+        # Log the full error for debugging
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500, 
             detail=f"Error uploading file: {str(e)}"
         )
-
 
 # Dashboard endpoints
 @app.get("/dashboard/overview", response_model=Dict[str, Any])
