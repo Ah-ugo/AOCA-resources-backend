@@ -75,6 +75,44 @@ class UserResponse(User):
     courses: Optional[List[Dict[str, Any]]] = []
 
 
+# Contact Form Model
+class ContactForm(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    phone: str
+    service: str
+    message: str
+
+
+# NEW: Admission Inquiry Model (for popup form)
+class AdmissionInquiry(BaseModel):
+    """
+    Model for admission inquiries from the popup form
+    """
+    first_name: str
+    last_name: str
+    email: EmailStr
+    phone: str
+    program: str  # ielts, gmat, sat, gre, gcse, toefl, scratch, python, web
+    location: str  # lagos, port-harcourt, online
+    message: Optional[str] = None
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "first_name": "John",
+                "last_name": "Doe",
+                "email": "john@example.com",
+                "phone": "+2348012345678",
+                "program": "ielts",
+                "location": "lagos",
+                "message": "I'm interested in the IELTS preparation course"
+            }
+        }
+    }
+
+
 # Blog models
 class BlogPostBase(BaseModel):
     title: str
@@ -469,12 +507,3 @@ class ResourceResponse(BaseModel):
         if isinstance(obj, datetime):
             return obj.isoformat()
         return obj
-
-
-class ContactForm(BaseModel):
-    first_name: str
-    last_name: str
-    email: EmailStr
-    phone: str
-    service: str
-    message: str
