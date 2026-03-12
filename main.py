@@ -2385,6 +2385,78 @@ async def export_inquiries_csv(
 
 # ==================== JOB ADMIN ENDPOINTS ====================
 
+# ==================== ADMIN CAREERS STATS ====================
+
+@app.get("/admin/careers/stats", response_model=Dict[str, Any])
+async def admin_get_careers_stats(admin_user: User = Depends(get_admin_user)):
+    """
+    Get careers-specific statistics (admin only)
+    """
+    try:
+        # Job statistics
+        total_jobs = db.job_listings.count_documents({})
+        published_jobs = db.job_listings.count_documents({"is_published": True})
+        featured_jobs = db.job_listings.count_documents({"is_featured": True})
+
+        # Application statistics
+        total_applications = db.job_applications.count_documents({})
+        applications_by_status = list(db.job_applications.aggregate([
+            {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+            {"$sort": {"_id": 1}}
+        ]))
+
+        # Category statistics
+        categories = list(db.job_categories.find())
+        for category in categories:
+            job_count = db.job_listings.count_documents({
+                "category": category["name"],
+                "is_published": True
+            })
+            category["job_count"] = job_count
+
+        # Recent activity
+        recent_jobs = list(db.job_listings.find().sort("created_at", -1).limit(5))
+        recent_applications = list(db.job_applications.find().sort("created_at", -1).limit(5))
+
+        # Add job info to recent applications
+        for app in recent_applications:
+            job = db.job_listings.find_one({"_id": app["job_id"]})
+            if job:
+                app["job"] = {
+                    "id": str(job["_id"]),
+                    "title": job["title"],
+                    "company": job["company"]
+                }
+
+        # Top viewed jobs
+        top_viewed_jobs = list(db.job_listings.find().sort("views", -1).limit(5))
+
+        # Jobs with most applications
+        top_applied_jobs = list(db.job_listings.find().sort("applications_count", -1).limit(5))
+
+        return {
+            "job_stats": {
+                "total": total_jobs,
+                "published": published_jobs,
+                "featured": featured_jobs
+            },
+            "application_stats": {
+                "total": total_applications,
+                "by_status": parse_json(applications_by_status)
+            },
+            "categories": parse_json(categories),
+            "recent_activity": {
+                "jobs": parse_json(recent_jobs),
+                "applications": parse_json(recent_applications)
+            },
+            "top_jobs": {
+                "by_views": parse_json(top_viewed_jobs),
+                "by_applications": parse_json(top_applied_jobs)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/admin/careers/jobs", response_model=Dict[str, Any])
 async def admin_get_job_listings(
         admin_user: User = Depends(get_admin_user),
