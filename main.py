@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, Query, UploadFile, File, WebSocket, WebSocketDisconnect
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from typing import List, Dict, Any, Optional, Literal, Union
@@ -596,6 +597,39 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
+
+class ConnectionManager:
+    def __init__(self):
+        # Store active connections: {user_id: [WebSocket]}
+        self.active_connections: Dict[str, List[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, user_id: str):
+        await websocket.accept()
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = []
+        self.active_connections[user_id].append(websocket)
+
+    def disconnect(self, websocket: WebSocket, user_id: str):
+        if user_id in self.active_connections:
+            if websocket in self.active_connections[user_id]:
+                self.active_connections[user_id].remove(websocket)
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
+
+    async def send_personal_message(self, message: str, user_id: str):
+        if user_id in self.active_connections:
+            for connection in self.active_connections[user_id]:
+                await connection.send_text(message)
+
+    async def broadcast(self, message: str):
+        for user_id in self.active_connections:
+            for connection in self.active_connections[user_id]:
+                await connection.send_text(message)
+
+manager = ConnectionManager()
+
+
+
 # ==================== EXCEPTION HANDLERS ====================
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request, exc):
@@ -698,6 +732,16 @@ async def get_admin_user(current_user: User = Depends(get_current_active_user)):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions. Admin access required."
+        )
+    return current_user
+
+
+
+async def get_instructor_user(current_user: User = Depends(get_current_active_user)):
+    if current_user.role not in ["instructor", "admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions. Instructor access required."
         )
     return current_user
 
@@ -1602,6 +1646,96 @@ async def update_user_profile(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ==================== INSTRUCTOR ENDPOINTS ====================
+
+@app.websocket("/instructor/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: str):
+    await manager.connect(websocket, user_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Here you would parse the message, save to DB, etc.
+            # For now, we echo it back or broadcast
+            await manager.send_personal_message(f"You wrote: {data}", user_id)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, user_id)
+
+@app.get("/instructor/dashboard/stats", response_model=Dict[str, Any])
+async def get_instructor_stats(current_user: User = Depends(get_instructor_user)):
+    """
+    Get statistics for the instructor dashboard
+    """
+    try:
+        user_id = ObjectId(current_user.id)
+        
+        # Count courses taught by instructor
+        total_courses = db.courses.count_documents({"instructor_id": user_id})
+        
+        # Get course IDs to find students
+        instructor_courses = list(db.courses.find({"instructor_id": user_id}, {"_id": 1}))
+        course_ids = [c["_id"] for c in instructor_courses]
+        
+        # Count total students enrolled in these courses
+        total_students = db.user_courses.count_documents({"course_id": {"$in": course_ids}})
+        
+        # Count total assignments created
+        total_assignments = db.assignments.count_documents({"course_id": {"$in": course_ids}})
+        
+        # Calculate pending grading (assignments submitted but not graded)
+        pending_grading = 0 
+        assignments = db.assignments.find({"course_id": {"$in": course_ids}})
+        for assignment in assignments:
+            if "submissions" in assignment:
+                for sub in assignment["submissions"]:
+                    if not sub.get("grade"):
+                        pending_grading += 1
+
+        # Recent activity (e.g., recent enrollments)
+        recent_enrollments = list(db.user_courses.aggregate([
+            {"$match": {"course_id": {"$in": course_ids}}},
+            {"$sort": {"enrolled_at": -1}},
+            {"$limit": 5},
+            {"$lookup": {
+                "from": "users",
+                "localField": "user_id",
+                "foreignField": "_id",
+                "as": "student"
+            }},
+            {"$unwind": "$student"},
+            {"$lookup": {
+                "from": "courses",
+                "localField": "course_id",
+                "foreignField": "_id",
+                "as": "course"
+            }},
+            {"$unwind": "$course"},
+            {"$project": {
+                "student_name": {"$concat": ["$student.first_name", " ", "$student.last_name"]},
+                "course_name": "$course.name",
+                "enrolled_at": 1
+            }}
+        ]))
+
+        return {
+            "stats": {
+                "total_courses": total_courses,
+                "total_students": total_students,
+                "total_assignments": total_assignments,
+                "pending_grading": pending_grading
+            },
+            "recent_enrollments": parse_json(recent_enrollments)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/instructor/courses")
+async def get_instructor_courses(current_user: User = Depends(get_instructor_user)):
+    """Get all courses taught by the instructor"""
+    courses = list(db.courses.find({"instructor_id": ObjectId(current_user.id)}))
+    return parse_json(courses)
 
 
 # ==================== ADMIN USERS ENDPOINTS ====================
