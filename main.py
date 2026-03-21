@@ -1486,6 +1486,48 @@ async def upload_resume(file: UploadFile = File(...)):
         )
 
 
+
+@app.post("/students/apply", response_model=Dict[str, Any])
+async def student_apply(
+    body: dict,
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Student expresses interest in a course.
+    Creates a pending record. Admin must approve + assign.
+    Body: { course_id: str, message?: str }
+    """
+    course_id = body.get("course_id")
+    if not course_id or not ObjectId.is_valid(course_id):
+        raise HTTPException(status_code=400, detail="course_id required")
+ 
+    course = db.courses.find_one({"_id": ObjectId(course_id)})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+ 
+    user_oid = ObjectId(current_user.id)
+    course_oid = ObjectId(course_id)
+ 
+    existing = db.user_courses.find_one({"user_id": user_oid, "course_id": course_oid})
+    if existing:
+        return {"message": "Application already exists", "status": existing.get("status")}
+ 
+    doc = {
+        "user_id": user_oid,
+        "course_id": course_oid,
+        "class_id": None,
+        "status": "pending",
+        "enrolled_at": None,
+        "approved_at": None,
+        "approved_by": None,
+        "note": body.get("message", ""),
+        "created_at": datetime.utcnow(),
+    }
+    result = db.user_courses.insert_one(doc)
+    return {"message": "Application submitted. You will be notified when approved.", "id": str(result.inserted_id)}
+ 
+
+
 # ==================== IMAGE UPLOAD ENDPOINT ====================
 
 @app.post("/upload/image")
@@ -1866,7 +1908,32 @@ async def get_course_progress_fixed(
         "last_lesson_id":       str(progress["last_lesson_id"]) if progress and progress.get("last_lesson_id") else None,
         "last_active":          progress["last_active"].isoformat() if progress and progress.get("last_active") else None,
     }
+
+
+@app.get("/students/my-enrollments", response_model=List[Dict[str, Any]])
+async def get_my_enrollments(
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Student sees all their enrollment records — pending, approved, active, etc.
+    They never see other students.
+    """
+    user_oid = ObjectId(current_user.id)
+    records = list(db.user_courses.find({"user_id": user_oid}))
  
+    result = []
+    for rec in records:
+        course = db.courses.find_one({"_id": rec.get("course_id")})
+        class_ = db.classes.find_one({"_id": rec.get("class_id")}) if rec.get("class_id") else None
+        result.append({
+            **parse_json(rec),
+            "course_name":  course.get("name") if course else None,
+            "course_level": course.get("level") if course else None,
+            "class_title":  class_.get("title") if class_ else None,
+            "class_date":   class_.get("date").isoformat() if class_ and class_.get("date") else None,
+            "meet_link":    class_.get("meet_link") if class_ else None,
+        })
+    return result
 
 
 
@@ -2142,6 +2209,443 @@ async def delete_user(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.get("/admin/enrollments/pending", response_model=Dict[str, Any])
+async def get_pending_enrollments(
+    admin_user: User = Depends(get_admin_user),
+    course_id: Optional[str] = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """
+    All pending student applications waiting for admin approval.
+    """
+    query: dict = {"status": "pending"}
+    if course_id and ObjectId.is_valid(course_id):
+        query["course_id"] = ObjectId(course_id)
+ 
+    pipeline = [
+        {"$match": query},
+        {"$sort": {"created_at": 1}},
+        {"$skip": skip},
+        {"$limit": limit},
+        {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "_id", "as": "student"}},
+        {"$lookup": {"from": "courses", "localField": "course_id", "foreignField": "_id", "as": "course"}},
+        {"$unwind": {"path": "$student", "preserveNullAndEmptyArrays": True}},
+        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        {"$project": {
+            "status": 1, "created_at": 1, "note": 1,
+            "student_id": "$student._id",
+            "student_name": {"$concat": ["$student.first_name", " ", "$student.last_name"]},
+            "student_email": "$student.email",
+            "course_name": "$course.name",
+            "course_id": 1,
+        }},
+    ]
+    results = list(db.user_courses.aggregate(pipeline))
+    total = db.user_courses.count_documents(query)
+    return {"enrollments": parse_json(results), "total": total}
+
+
+
+@app.post("/admin/enrollments/{enrollment_id}/approve", response_model=Dict[str, Any])
+async def approve_enrollment(
+    enrollment_id: str,
+    body: dict = {},
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    Mark a pending application as approved.
+    Student is not yet active — admin still needs to assign them to a class.
+    Body: { note?: str }
+    """
+    if not ObjectId.is_valid(enrollment_id):
+        raise HTTPException(status_code=400, detail="Invalid enrollment ID")
+ 
+    rec = db.user_courses.find_one({"_id": ObjectId(enrollment_id)})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    if rec["status"] not in ("pending",):
+        raise HTTPException(status_code=400, detail=f"Cannot approve — current status: {rec['status']}")
+ 
+    db.user_courses.update_one(
+        {"_id": ObjectId(enrollment_id)},
+        {"$set": {
+            "status": "approved",
+            "approved_at": datetime.utcnow(),
+            "approved_by": ObjectId(admin_user.id),
+            "admin_note": body.get("note", ""),
+        }}
+    )
+    return {"message": "Student approved. Assign them to a class to make active.", "enrollment_id": enrollment_id}
+
+
+@app.post("/admin/enrollments/{enrollment_id}/reject", response_model=Dict[str, Any])
+async def reject_enrollment(
+    enrollment_id: str,
+    body: dict = {},
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    Reject a pending application.
+    Body: { reason?: str }
+    """
+    if not ObjectId.is_valid(enrollment_id):
+        raise HTTPException(status_code=400, detail="Invalid enrollment ID")
+ 
+    rec = db.user_courses.find_one({"_id": ObjectId(enrollment_id)})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+ 
+    db.user_courses.update_one(
+        {"_id": ObjectId(enrollment_id)},
+        {"$set": {
+            "status": "rejected",
+            "rejected_at": datetime.utcnow(),
+            "rejected_by": ObjectId(admin_user.id),
+            "rejection_reason": body.get("reason", ""),
+        }}
+    )
+    return {"message": "Student rejected.", "enrollment_id": enrollment_id}
+
+
+@app.post("/admin/enrollments/assign", response_model=Dict[str, Any])
+async def assign_student(
+    body: dict,
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    Assign an approved (or directly a new) student to a specific course + class.
+    This is the action that makes them fully active.
+ 
+    Body: {
+        user_id: str,
+        course_id: str,
+        class_id: str,
+        note?: str          # message to student
+    }
+    """
+    user_id  = body.get("user_id")
+    course_id = body.get("course_id")
+    class_id  = body.get("class_id")
+ 
+    for field, val in [("user_id", user_id), ("course_id", course_id), ("class_id", class_id)]:
+        if not val or not ObjectId.is_valid(val):
+            raise HTTPException(status_code=400, detail=f"{field} is required and must be valid")
+ 
+    user_oid   = ObjectId(user_id)
+    course_oid = ObjectId(course_id)
+    class_oid  = ObjectId(class_id)
+ 
+    # Validate all three objects exist
+    if not db.users.find_one({"_id": user_oid}):
+        raise HTTPException(status_code=404, detail="Student not found")
+    if not db.courses.find_one({"_id": course_oid}):
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not db.classes.find_one({"_id": class_oid}):
+        raise HTTPException(status_code=404, detail="Class not found")
+ 
+    now = datetime.utcnow()
+ 
+    # Upsert: create or update whatever record exists for this user+course
+    db.user_courses.update_one(
+        {"user_id": user_oid, "course_id": course_oid},
+        {"$set": {
+            "class_id": class_oid,
+            "status": "active",
+            "enrolled_at": now,
+            "approved_by": ObjectId(admin_user.id),
+            "admin_note": body.get("note", ""),
+            "updated_at": now,
+        },
+        "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+ 
+    # Add student to class.students array (keep class roster in sync)
+    db.classes.update_one(
+        {"_id": class_oid},
+        {"$addToSet": {"students": user_oid}}
+    )
+ 
+    # Seed progress doc
+    db.progress.update_one(
+        {"user_id": user_oid, "course_id": course_oid},
+        {"$setOnInsert": {
+            "user_id": user_oid,
+            "course_id": course_oid,
+            "completed_lesson_ids": [],
+            "percentage": 0,
+            "last_active": now,
+        }},
+        upsert=True,
+    )
+ 
+    return {
+        "message": "Student assigned and activated.",
+        "user_id": user_id,
+        "course_id": course_id,
+        "class_id": class_id,
+    }
+
+
+@app.post("/admin/enrollments/reassign", response_model=Dict[str, Any])
+async def reassign_student(
+    body: dict,
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    Move a student from their current class to a new class (same course).
+    Removes from old class roster, adds to new.
+ 
+    Body: {
+        user_id: str,
+        course_id: str,
+        new_class_id: str,
+        reason?: str
+    }
+    """
+    user_id      = body.get("user_id")
+    course_id    = body.get("course_id")
+    new_class_id = body.get("new_class_id")
+ 
+    for field, val in [("user_id", user_id), ("course_id", course_id), ("new_class_id", new_class_id)]:
+        if not val or not ObjectId.is_valid(val):
+            raise HTTPException(status_code=400, detail=f"{field} is required")
+ 
+    user_oid      = ObjectId(user_id)
+    course_oid    = ObjectId(course_id)
+    new_class_oid = ObjectId(new_class_id)
+ 
+    rec = db.user_courses.find_one({"user_id": user_oid, "course_id": course_oid})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    if rec.get("status") != "active":
+        raise HTTPException(status_code=400, detail="Student is not currently active in this course")
+    if not db.classes.find_one({"_id": new_class_oid}):
+        raise HTTPException(status_code=404, detail="New class not found")
+ 
+    old_class_oid = rec.get("class_id")
+ 
+    # Remove from old class roster
+    if old_class_oid:
+        db.classes.update_one(
+            {"_id": old_class_oid},
+            {"$pull": {"students": user_oid}}
+        )
+ 
+    # Add to new class roster
+    db.classes.update_one(
+        {"_id": new_class_oid},
+        {"$addToSet": {"students": user_oid}}
+    )
+ 
+    # Update enrollment record
+    db.user_courses.update_one(
+        {"user_id": user_oid, "course_id": course_oid},
+        {"$set": {
+            "class_id": new_class_oid,
+            "reassigned_at": datetime.utcnow(),
+            "reassigned_by": ObjectId(admin_user.id),
+            "reassign_reason": body.get("reason", ""),
+        }}
+    )
+ 
+    return {
+        "message": "Student reassigned successfully.",
+        "user_id": user_id,
+        "course_id": course_id,
+        "new_class_id": new_class_id,
+        "old_class_id": str(old_class_oid) if old_class_oid else None,
+    }
+
+
+@app.post("/admin/enrollments/remove", response_model=Dict[str, Any])
+async def remove_student_from_class(
+    body: dict,
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    Remove a student from a class (and optionally the entire course).
+    Their progress is preserved but they lose access immediately.
+ 
+    Body: {
+        user_id: str,
+        course_id: str,
+        remove_from_course?: bool   # default False — removes class only
+        reason?: str
+    }
+    """
+    user_id   = body.get("user_id")
+    course_id = body.get("course_id")
+ 
+    for field, val in [("user_id", user_id), ("course_id", course_id)]:
+        if not val or not ObjectId.is_valid(val):
+            raise HTTPException(status_code=400, detail=f"{field} is required")
+ 
+    user_oid   = ObjectId(user_id)
+    course_oid = ObjectId(course_id)
+ 
+    rec = db.user_courses.find_one({"user_id": user_oid, "course_id": course_oid})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+ 
+    old_class_oid = rec.get("class_id")
+    remove_course = body.get("remove_from_course", False)
+ 
+    # Remove from class roster
+    if old_class_oid:
+        db.classes.update_one(
+            {"_id": old_class_oid},
+            {"$pull": {"students": user_oid}}
+        )
+ 
+    if remove_course:
+        # Full removal from course
+        db.user_courses.update_one(
+            {"user_id": user_oid, "course_id": course_oid},
+            {"$set": {
+                "status": "removed",
+                "class_id": None,
+                "removed_at": datetime.utcnow(),
+                "removed_by": ObjectId(admin_user.id),
+                "removal_reason": body.get("reason", ""),
+            }}
+        )
+        msg = "Student removed from course."
+    else:
+        # Remove from class only, keep enrollment as approved (can be reassigned)
+        db.user_courses.update_one(
+            {"user_id": user_oid, "course_id": course_oid},
+            {"$set": {
+                "status": "approved",   # back to approved — awaiting class assignment
+                "class_id": None,
+                "removed_from_class_at": datetime.utcnow(),
+                "removal_reason": body.get("reason", ""),
+            }}
+        )
+        msg = "Student removed from class. They remain enrolled — assign a new class."
+ 
+    return {"message": msg, "user_id": user_id, "course_id": course_id}
+
+
+@app.get("/admin/enrollments", response_model=Dict[str, Any])
+async def list_all_enrollments(
+    admin_user: User = Depends(get_admin_user),
+    status: Optional[str] = None,           # pending|approved|active|rejected|removed
+    course_id: Optional[str] = None,
+    class_id: Optional[str] = None,
+    search: Optional[str] = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """
+    Master enrollment list for admin — all statuses, all filters.
+    """
+    match: dict = {}
+    if status:
+        match["status"] = status
+    if course_id and ObjectId.is_valid(course_id):
+        match["course_id"] = ObjectId(course_id)
+    if class_id and ObjectId.is_valid(class_id):
+        match["class_id"] = ObjectId(class_id)
+ 
+    pipeline = [
+        {"$match": match},
+        {"$sort": {"created_at": -1}},
+        {"$lookup": {"from": "users",   "localField": "user_id",   "foreignField": "_id", "as": "student"}},
+        {"$lookup": {"from": "courses", "localField": "course_id", "foreignField": "_id", "as": "course"}},
+        {"$lookup": {"from": "classes", "localField": "class_id",  "foreignField": "_id", "as": "class"}},
+        {"$unwind": {"path": "$student", "preserveNullAndEmptyArrays": True}},
+        {"$unwind": {"path": "$course",  "preserveNullAndEmptyArrays": True}},
+        {"$unwind": {"path": "$class",   "preserveNullAndEmptyArrays": True}},
+    ]
+ 
+    # Search filter applied after join
+    if search:
+        pipeline.append({"$match": {"$or": [
+            {"student.first_name": {"$regex": search, "$options": "i"}},
+            {"student.last_name":  {"$regex": search, "$options": "i"}},
+            {"student.email":      {"$regex": search, "$options": "i"}},
+        ]}})
+ 
+    pipeline += [
+        {"$skip": skip},
+        {"$limit": limit},
+        {"$project": {
+            "status": 1,
+            "created_at": 1,
+            "enrolled_at": 1,
+            "approved_at": 1,
+            "admin_note": 1,
+            "student_id":    "$student._id",
+            "student_name":  {"$concat": ["$student.first_name", " ", "$student.last_name"]},
+            "student_email": "$student.email",
+            "course_name":   "$course.name",
+            "course_id":     1,
+            "class_title":   "$class.title",
+            "class_id":      1,
+        }},
+    ]
+ 
+    results = list(db.user_courses.aggregate(pipeline))
+    total = db.user_courses.count_documents(match)
+ 
+    # Status counts for tab badges
+    counts = {
+        s: db.user_courses.count_documents({"status": s})
+        for s in ("pending", "approved", "active", "rejected", "removed")
+    }
+ 
+    return {
+        "enrollments": parse_json(results),
+        "total": total,
+        "counts": counts,
+    }
+
+
+@app.get("/admin/classes/{class_id}/students", response_model=Dict[str, Any])
+async def get_class_students(
+    class_id: str,
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    All active students in a class, with their progress.
+    """
+    if not ObjectId.is_valid(class_id):
+        raise HTTPException(status_code=400, detail="Invalid class ID")
+ 
+    class_oid = ObjectId(class_id)
+    class_doc = db.classes.find_one({"_id": class_oid})
+    if not class_doc:
+        raise HTTPException(status_code=404, detail="Class not found")
+ 
+    enrollments = list(db.user_courses.find({"class_id": class_oid, "status": "active"}))
+    student_ids = [e["user_id"] for e in enrollments]
+    students = list(db.users.find({"_id": {"$in": student_ids}}))
+ 
+    result = []
+    for s in students:
+        enrollment = next((e for e in enrollments if e["user_id"] == s["_id"]), None)
+        progress   = db.progress.find_one({"user_id": s["_id"], "course_id": class_doc.get("course_id")})
+        result.append({
+            "student_id":    str(s["_id"]),
+            "name":          f"{s.get('first_name','')} {s.get('last_name','')}".strip(),
+            "email":         s.get("email"),
+            "phone":         s.get("phone"),
+            "enrolled_at":   enrollment.get("enrolled_at").isoformat() if enrollment and enrollment.get("enrolled_at") else None,
+            "progress_pct":  progress.get("percentage", 0) if progress else 0,
+            "last_active":   progress.get("last_active").isoformat() if progress and progress.get("last_active") else None,
+        })
+ 
+    return {
+        "class_id": class_id,
+        "class_title": class_doc.get("title"),
+        "student_count": len(result),
+        "students": result,
+    }
 
 
 # ==================== ADMIN COURSES ENDPOINTS ====================
