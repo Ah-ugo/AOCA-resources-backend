@@ -2072,11 +2072,24 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     try:
         while True:
             data = await websocket.receive_text()
-            # Here you would parse the message, save to DB, etc.
-            # For now, we echo it back or broadcast
-            await manager.send_personal_message(f"You wrote: {data}", user_id)
+            try:
+                payload = json.loads(data)
+                # Persist the message to DB
+                if payload.get("text") and payload.get("chatId"):
+                    db.messages.insert_one({
+                        "sender_id":    ObjectId(user_id),
+                        "recipient_id": ObjectId(payload["chatId"]),
+                        "text":         payload["text"],
+                        "is_read":      False,
+                        "created_at":   datetime.utcnow(),
+                    })
+                # Deliver to recipient if online
+                await manager.send_personal_message(data, payload.get("chatId", user_id))
+            except Exception:
+                await manager.send_personal_message(data, user_id)
     except WebSocketDisconnect:
         manager.disconnect(websocket, user_id)
+
 
 @app.get("/instructor/dashboard/stats", response_model=Dict[str, Any])
 async def get_instructor_stats_v2(
