@@ -22,6 +22,7 @@ import warnings
 import uuid
 import csv
 from io import StringIO
+import httpx
 
 # Suppress passlib warnings
 warnings.filterwarnings("ignore", message=".*trapped.*")
@@ -908,6 +909,73 @@ async def register_user(user: UserCreate):
         )
 
 
+
+
+@app.get("/courses", response_model=Dict[str, Any])
+async def get_public_courses(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(12, ge=1, le=50),
+    level: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    """Public course catalog — no authentication required."""
+    query: dict = {}
+    if level:
+        query["level"] = level
+    if search:
+        query["$or"] = [
+            {"name":  {"$regex": search, "$options": "i"}},
+            {"title": {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}},
+        ]
+ 
+    courses = list(db.courses.find(query).skip(skip).limit(limit))
+    total = db.courses.count_documents(query)
+ 
+    for c in courses:
+        if c.get("instructor_id"):
+            inst = db.users.find_one({"_id": c["instructor_id"]})
+            if inst:
+                c["instructor"] = {
+                    "name": f"{inst.get('first_name','')} {inst.get('last_name','')}".strip(),
+                    "email": inst.get("email"),
+                }
+        # Normalise: ensure both 'name' and 'title' present
+        c.setdefault("title", c.get("name", ""))
+        c.setdefault("name",  c.get("title", ""))
+ 
+    return {"courses": parse_json(courses), "total": total, "skip": skip, "limit": limit}
+
+
+
+@app.get("/courses/{course_id}", response_model=Dict[str, Any])
+async def get_public_course(course_id: str):
+    """Public single course — no authentication required."""
+    if not ObjectId.is_valid(course_id):
+        raise HTTPException(status_code=400, detail="Invalid course ID")
+ 
+    course = db.courses.find_one({"_id": ObjectId(course_id)})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+ 
+    if course.get("instructor_id"):
+        inst = db.users.find_one({"_id": course["instructor_id"]})
+        if inst:
+            course["instructor"] = {
+                "name": f"{inst.get('first_name','')} {inst.get('last_name','')}".strip(),
+                "email": inst.get("email"),
+            }
+ 
+    # Normalise name/title
+    course.setdefault("title", course.get("name", ""))
+    course.setdefault("name",  course.get("title", ""))
+ 
+    course["enrollment_count"] = db.user_courses.count_documents({
+        "course_id": ObjectId(course_id), "status": "active"
+    })
+    return parse_json(course)
+
+
 # ==================== BLOG ENDPOINTS ====================
 
 @app.get("/blog/posts", response_model=Dict[str, Any])
@@ -1438,6 +1506,56 @@ async def upload_image(
 
 # ==================== DASHBOARD ENDPOINTS ====================
 
+
+
+@app.get("/dashboard", response_model=Dict[str, Any])
+async def get_user_dashboard(
+    current_user: User = Depends(get_current_active_user)
+):
+    """Master student dashboard — one call for everything."""
+    user_oid = ObjectId(current_user.id)
+ 
+    # FIX #2: only active enrollments
+    enrollments = list(db.user_courses.find({"user_id": user_oid, "status": "active"}))
+    course_ids  = [e["course_id"] for e in enrollments]
+    courses_raw = list(db.courses.find({"_id": {"$in": course_ids}}))
+ 
+    courses = []
+    for c in courses_raw:
+        prog = db.progress.find_one({"user_id": user_oid, "course_id": c["_id"]})
+        c.setdefault("title", c.get("name", ""))
+        c.setdefault("name",  c.get("title", ""))
+        courses.append({
+            **parse_json(c),
+            "progress":       prog.get("percentage", 0) if prog else 0,
+            "last_lesson_id": str(prog["last_lesson_id"]) if prog and prog.get("last_lesson_id") else None,
+        })
+ 
+    upcoming_classes = list(
+        db.classes.find({"course_id": {"$in": course_ids}, "date": {"$gte": datetime.utcnow()}})
+        .sort("date", 1).limit(5)
+    )
+    for cls in upcoming_classes:
+        if cls.get("instructor_id"):
+            inst = db.users.find_one({"_id": cls["instructor_id"]})
+            if inst:
+                cls["instructor"] = {"name": f"{inst.get('first_name','')} {inst.get('last_name','')}".strip()}
+ 
+    pending_assignments = list(
+        db.assignments.find({"course_id": {"$in": course_ids}})
+        .sort("due_date", 1).limit(10)
+    )
+ 
+    levels     = list({c.get("level") for c in courses_raw if c.get("level")})
+    resources  = list(db.resources.find({"level": {"$in": levels}}).limit(6)) if levels else []
+ 
+    return {
+        "courses":             courses,
+        "upcoming_classes":    parse_json(upcoming_classes),
+        "pending_assignments": parse_json(pending_assignments),
+        "resources":           parse_json(resources),
+    }
+
 @app.get("/dashboard/overview", response_model=Dict[str, Any])
 async def get_dashboard_overview(current_user: User = Depends(get_current_active_user)):
     """
@@ -1483,169 +1601,272 @@ async def get_dashboard_overview(current_user: User = Depends(get_current_active
 
 
 @app.get("/dashboard/courses", response_model=List[Dict[str, Any]])
-async def get_user_courses(current_user: User = Depends(get_current_active_user)):
-    """
-    Get all courses for current user
-    """
-    try:
-        user_courses = list(db.user_courses.find({"user_id": ObjectId(current_user.id)}))
-        course_ids = [uc["course_id"] for uc in user_courses]
-
-        courses = list(db.courses.find({"_id": {"$in": course_ids}}))
-
-        for course in courses:
-            progress = db.progress.find_one({
-                "user_id": ObjectId(current_user.id),
-                "course_id": course["_id"]
-            })
-            course["progress"] = progress["percentage"] if progress else 0
-
-        return parse_json(courses)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/dashboard/assignments", response_model=List[Dict[str, Any]])
-async def get_user_assignments(
-        current_user: User = Depends(get_current_active_user),
-        status: Optional[str] = None
+async def get_user_courses_dashboard(
+    current_user: User = Depends(get_current_active_user)
 ):
-    """
-    Get assignments for current user with optional status filter
-    """
-    try:
-        user_courses = list(db.user_courses.find({"user_id": ObjectId(current_user.id)}))
-        course_ids = [uc["course_id"] for uc in user_courses]
-
-        query = {"course_id": {"$in": course_ids}}
-
-        if status == "pending":
-            query["submissions.user_id"] = {"$ne": ObjectId(current_user.id)}
-            query["due_date"] = {"$gte": datetime.utcnow()}
-        elif status == "completed":
-            query["submissions.user_id"] = ObjectId(current_user.id)
-        elif status == "overdue":
-            query["submissions.user_id"] = {"$ne": ObjectId(current_user.id)}
-            query["due_date"] = {"$lt": datetime.utcnow()}
-
-        assignments = list(db.assignments.find(query).sort("due_date", 1))
-
-        for assignment in assignments:
-            course = db.courses.find_one({"_id": assignment["course_id"]})
-            if course:
-                assignment["course"] = {
-                    "id": str(course["_id"]),
-                    "name": course["name"],
-                    "level": course["level"]
-                }
-
-        return parse_json(assignments)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    user_oid    = ObjectId(current_user.id)
+    enrollments = list(db.user_courses.find({"user_id": user_oid, "status": "active"}))
+    course_ids  = [e["course_id"] for e in enrollments]
+    courses     = list(db.courses.find({"_id": {"$in": course_ids}}))
+ 
+    result = []
+    for c in courses:
+        prog = db.progress.find_one({"user_id": user_oid, "course_id": c["_id"]})
+        c.setdefault("title", c.get("name", ""))
+        c.setdefault("name",  c.get("title", ""))
+        c["progress"] = prog.get("percentage", 0) if prog else 0
+        result.append(parse_json(c))
+    return result
 
 
-@app.get("/dashboard/classes", response_model=List[Dict[str, Any]])
-async def get_user_classes(
-        current_user: User = Depends(get_current_active_user),
-        upcoming: bool = True
+@app.get("/dashboard/courses/{course_id}", response_model=Dict[str, Any])
+async def get_course_for_student(
+    course_id: str,
+    current_user: User = Depends(get_current_active_user),
 ):
-    """
-    Get classes for current user (upcoming or past)
-    """
-    try:
-        user_courses = list(db.user_courses.find({"user_id": ObjectId(current_user.id)}))
-        course_ids = [uc["course_id"] for uc in user_courses]
+    if not ObjectId.is_valid(course_id):
+        raise HTTPException(status_code=400, detail="Invalid course ID")
+ 
+    enrollment = db.user_courses.find_one({
+        "user_id":   ObjectId(current_user.id),
+        "course_id": ObjectId(course_id),
+        "status":    "active",
+    })
+    if not enrollment:
+        raise HTTPException(status_code=403, detail="Not enrolled in this course")
+ 
+    course = db.courses.find_one({"_id": ObjectId(course_id)})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+ 
+    course.setdefault("title", course.get("name", ""))
+    course.setdefault("name",  course.get("title", ""))
+ 
+    if course.get("instructor_id"):
+        inst = db.users.find_one({"_id": course["instructor_id"]})
+        if inst:
+            course["instructor"] = {
+                "name":  f"{inst.get('first_name','')} {inst.get('last_name','')}".strip(),
+                "email": inst.get("email"),
+            }
+ 
+    # Attach modules (needed by VideoPlayer sidebar)
+    course["modules"] = list(db.modules.find({"course_id": ObjectId(course_id)}).sort("order", 1)) \
+        if db.list_collection_names().__contains__("modules") else course.get("modules", [])
+ 
+    return parse_json(course)
 
-        query = {"course_id": {"$in": course_ids}}
-
-        if upcoming:
-            query["date"] = {"$gte": datetime.utcnow()}
-            sort_dir = 1
+@app.get("/dashboard/assignments", response_model=Dict[str, Any])
+async def get_user_assignments_dashboard(
+    current_user: User = Depends(get_current_active_user),
+    status: Optional[str] = None,
+):
+    user_oid    = ObjectId(current_user.id)
+    enrollments = list(db.user_courses.find({"user_id": user_oid, "status": "active"}))
+    course_ids  = [e["course_id"] for e in enrollments]
+ 
+    query: dict = {"course_id": {"$in": course_ids}}
+    now = datetime.utcnow()
+ 
+    if status == "pending":
+        query["due_date"] = {"$gte": now}
+        # exclude assignments where this user has submitted
+        query["submissions.user_id"] = {"$ne": user_oid}
+    elif status == "completed":
+        query["submissions.user_id"] = user_oid
+    elif status == "overdue":
+        query["due_date"] = {"$lt": now}
+        query["submissions.user_id"] = {"$ne": user_oid}
+ 
+    assignments = list(db.assignments.find(query).sort("due_date", 1))
+ 
+    for a in assignments:
+        course = db.courses.find_one({"_id": a.get("course_id")})
+        if course:
+            a["course"] = {"id": str(course["_id"]), "name": course.get("name")}
+ 
+        # Compute per-assignment status
+        submitted = any(str(s.get("user_id")) == str(user_oid) for s in a.get("submissions", []))
+        if submitted:
+            a["status"] = "completed"
+        elif a.get("due_date") and a["due_date"] < now:
+            a["status"] = "overdue"
         else:
-            query["date"] = {"$lt": datetime.utcnow()}
-            sort_dir = -1
+            a["status"] = "pending"
+ 
+    return {"assignments": parse_json(assignments)}
+ 
 
-        classes = list(db.classes.find(query).sort("date", sort_dir).limit(10))
 
-        for class_item in classes:
-            course = db.courses.find_one({"_id": class_item["course_id"]})
-            if course:
-                class_item["course"] = {
-                    "id": str(course["_id"]),
-                    "name": course["name"],
-                    "level": course["level"]
+@app.get("/dashboard/classes", response_model=Dict[str, Any])
+async def get_user_classes_dashboard(
+    current_user: User = Depends(get_current_active_user),
+    upcoming: bool = True,
+):
+    user_oid    = ObjectId(current_user.id)
+    enrollments = list(db.user_courses.find({"user_id": user_oid, "status": "active"}))
+    course_ids  = [e["course_id"] for e in enrollments]  # already ObjectIds from DB
+ 
+    now = datetime.utcnow()
+    date_filter = {"$gte": now} if upcoming else {"$lt": now}
+    sort_dir    = 1 if upcoming else -1
+ 
+    # FIX #12: course_id in classes collection is an ObjectId — match correctly
+    classes = list(
+        db.classes.find({"course_id": {"$in": course_ids}, "date": date_filter})
+        .sort("date", sort_dir).limit(20)
+    )
+ 
+    for cls in classes:
+        course = db.courses.find_one({"_id": cls.get("course_id")})
+        if course:
+            cls["course"] = {"id": str(course["_id"]), "name": course.get("name")}
+        if cls.get("instructor_id"):
+            inst = db.users.find_one({"_id": cls["instructor_id"]})
+            if inst:
+                cls["instructor"] = {
+                    "name": f"{inst.get('first_name','')} {inst.get('last_name','')}".strip()
                 }
-
-        return parse_json(classes)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+ 
+    return {"classes": parse_json(classes)}
 
 
-@app.get("/dashboard/resources", response_model=List[Dict[str, Any]])
-async def get_learning_resources(
-        current_user: User = Depends(get_current_active_user),
-        category: Optional[str] = None
+@app.get("/dashboard/classes/{class_id}", response_model=Dict[str, Any])
+async def get_class_for_student_dashboard(
+    class_id: str,
+    current_user: User = Depends(get_current_active_user),
 ):
-    """
-    Get learning resources based on user's course levels
-    """
-    try:
-        user_courses = list(db.user_courses.find({"user_id": ObjectId(current_user.id)}))
-        course_ids = [uc["course_id"] for uc in user_courses]
-
-        courses = list(db.courses.find({"_id": {"$in": course_ids}}))
-        levels = [course["level"] for course in courses]
-
-        query = {"level": {"$in": levels}}
-        if category:
-            query["category"] = category
-
-        resources = list(db.resources.find(query))
-        return parse_json(resources)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/dashboard/profile", response_model=User)
-async def get_user_profile(current_user: User = Depends(get_current_active_user)):
-    """
-    Get current user's profile
-    """
-    return current_user
+    if not ObjectId.is_valid(class_id):
+        raise HTTPException(status_code=400, detail="Invalid class ID")
+ 
+    cls = db.classes.find_one({"_id": ObjectId(class_id)})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Class not found")
+ 
+    if cls.get("course_id"):
+        course = db.courses.find_one({"_id": cls["course_id"]})
+        if course:
+            cls["course"] = {"_id": str(course["_id"]), "name": course.get("name")}
+ 
+    if cls.get("instructor_id"):
+        inst = db.users.find_one({"_id": cls["instructor_id"]})
+        if inst:
+            cls["instructor"] = {
+                "_id":   str(inst["_id"]),
+                "name":  f"{inst.get('first_name','')} {inst.get('last_name','')}".strip(),
+                "email": inst.get("email"),
+            }
+ 
+    return parse_json(cls)
 
 
-@app.put("/dashboard/profile", response_model=User)
-async def update_user_profile(
-        profile_update: dict,
-        current_user: User = Depends(get_current_active_user)
+@app.get("/dashboard/resources", response_model=Dict[str, Any])
+async def get_learning_resources_dashboard(
+    current_user: User = Depends(get_current_active_user),
+    category: Optional[str] = None,
+    search: Optional[str] = None,
 ):
-    """
-    Update current user's profile
-    """
-    try:
-        allowed_fields = ["first_name", "last_name", "phone", "address", "bio", "image"]
-        update_data = {k: v for k, v in profile_update.items() 
-                      if k in allowed_fields and v is not None}
-        
-        if not update_data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No valid fields to update"
-            )
+    user_oid    = ObjectId(current_user.id)
+    enrollments = list(db.user_courses.find({"user_id": user_oid, "status": "active"}))
+    course_ids  = [e["course_id"] for e in enrollments]
+    courses     = list(db.courses.find({"_id": {"$in": course_ids}}))
+    levels      = list({c.get("level") for c in courses if c.get("level")})
+ 
+    query: dict = {}
+    if levels:
+        query["level"] = {"$in": levels}
+    if category:
+        query["category"] = category
+    if search:
+        query["$or"] = [
+            {"title":       {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}},
+        ]
+ 
+    resources = list(db.resources.find(query))
+    return {"resources": parse_json(resources)}
 
-        update_data["updated_at"] = datetime.utcnow()
 
-        db.users.update_one(
-            {"_id": ObjectId(current_user.id)},
-            {"$set": update_data}
-        )
+@app.get("/dashboard/resources/categories", response_model=Dict[str, Any])
+async def get_resource_categories_dashboard(
+    current_user: User = Depends(get_current_active_user),
+):
+    cats = db.resources.distinct("category")
+    return {"categories": [{"id": c, "name": c} for c in cats if c]}
 
-        updated_user = db.users.find_one({"_id": ObjectId(current_user.id)})
-        return parse_json(updated_user)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/dashboard/profile", response_model=Dict[str, Any])
+async def get_dashboard_profile(
+    current_user: User = Depends(get_current_active_user),
+):
+    user = db.users.find_one({"_id": ObjectId(current_user.id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"user": parse_json(user)}
+
+
+@app.put("/dashboard/profile", response_model=Dict[str, Any])
+async def update_dashboard_profile(
+    body: dict,
+    current_user: User = Depends(get_current_active_user),
+):
+    # FIX #6: whitelist only safe updatable fields — never email/role/password via this endpoint
+    ALLOWED = {"first_name", "last_name", "phone", "address", "bio", "image"}
+    update_data = {k: v for k, v in body.items() if k in ALLOWED and v is not None}
+ 
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+ 
+    update_data["updated_at"] = datetime.utcnow()
+    db.users.update_one({"_id": ObjectId(current_user.id)}, {"$set": update_data})
+    updated = db.users.find_one({"_id": ObjectId(current_user.id)})
+    return {"user": parse_json(updated)}
+
+
+
+@app.get("/dashboard/progress/{course_id}", response_model=Dict[str, Any])
+async def get_course_progress_fixed(
+    course_id: str,
+    current_user: User = Depends(get_current_active_user),
+):
+    if not ObjectId.is_valid(course_id):
+        raise HTTPException(status_code=400, detail="Invalid course ID")
+ 
+    # FIX #10: require active status, not just any enrollment
+    enrollment = db.user_courses.find_one({
+        "user_id":   ObjectId(current_user.id),
+        "course_id": ObjectId(course_id),
+        "status":    "active",
+    })
+    if not enrollment:
+        raise HTTPException(status_code=403, detail="Not enrolled in this course")
+ 
+    progress = db.progress.find_one({
+        "user_id":   ObjectId(current_user.id),
+        "course_id": ObjectId(course_id),
+    })
+ 
+    completed_ids = [str(lid) for lid in (progress.get("completed_lesson_ids", []) if progress else [])]
+ 
+    course      = db.courses.find_one({"_id": ObjectId(course_id)})
+    all_lessons = []
+    for mod in (course.get("modules", []) if course else []):
+        all_lessons.extend(mod.get("lessons", []))
+ 
+    total = len(all_lessons)
+    done  = len(completed_ids)
+    pct   = round((done / total) * 100) if total else 0
+ 
+    return {
+        "course_id":            course_id,
+        "completed_lesson_ids": completed_ids,
+        "total_lessons":        total,
+        "completed_count":      done,
+        "percentage":           pct,
+        "last_lesson_id":       str(progress["last_lesson_id"]) if progress and progress.get("last_lesson_id") else None,
+        "last_active":          progress["last_active"].isoformat() if progress and progress.get("last_active") else None,
+    }
+ 
 
 
 
@@ -1731,11 +1952,24 @@ async def get_instructor_stats(current_user: User = Depends(get_instructor_user)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/instructor/courses")
-async def get_instructor_courses(current_user: User = Depends(get_instructor_user)):
-    """Get all courses taught by the instructor"""
-    courses = list(db.courses.find({"instructor_id": ObjectId(current_user.id)}))
+@app.get("/instructor/courses", response_model=List[Dict[str, Any]])
+async def get_instructor_courses_fixed(
+    current_user: User = Depends(get_instructor_user),
+):
+    # FIX #8: was calling ObjectId(current_user.id) but current_user.id may already be str
+    try:
+        inst_oid = ObjectId(str(current_user.id))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+ 
+    courses = list(db.courses.find({"instructor_id": inst_oid}))
+    for c in courses:
+        c.setdefault("title", c.get("name", ""))
+        c["enrollment_count"] = db.user_courses.count_documents({
+            "course_id": c["_id"], "status": "active"
+        })
     return parse_json(courses)
+ 
 
 
 # ==================== ADMIN USERS ENDPOINTS ====================
@@ -2015,73 +2249,59 @@ async def get_course_by_id(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/admin/courses", response_model=CourseResponse)
-async def create_course(
-        course: CourseCreate,
-        admin_user: User = Depends(get_admin_user)
+@app.post("/admin/courses", response_model=Dict[str, Any])
+async def admin_create_course(
+    body: dict,
+    admin_user: User = Depends(get_admin_user),
 ):
-    """
-    Create a new course (admin only)
-    """
-    try:
-        course_data = course.dict()
-        course_data["created_at"] = datetime.utcnow()
-        course_data["updated_at"] = datetime.utcnow()
-
-        if course_data.get("instructor_id"):
-            instructor = db.users.find_one({"_id": ObjectId(course_data["instructor_id"])})
-            if not instructor:
-                raise HTTPException(status_code=404, detail="Instructor not found")
-            course_data["instructor_id"] = ObjectId(course_data["instructor_id"])
-
-        result = db.courses.insert_one(course_data)
-        created_course = db.courses.find_one({"_id": result.inserted_id})
-
-        return parse_json(created_course)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # FIX #7: CourseForm sends both 'name' and 'title' — store both
+    if "title" in body and "name" not in body:
+        body["name"] = body["title"]
+    if "name" in body and "title" not in body:
+        body["title"] = body["name"]
+ 
+    body["created_at"] = datetime.utcnow()
+    body["updated_at"] = datetime.utcnow()
+ 
+    if body.get("instructor_id") and ObjectId.is_valid(body["instructor_id"]):
+        body["instructor_id"] = ObjectId(body["instructor_id"])
+ 
+    # Convert price/duration to correct types
+    if "price"    in body: body["price"]    = float(body["price"]    or 0)
+    if "duration" in body: body["duration"] = int(body["duration"]   or 0)
+ 
+    result  = db.courses.insert_one(body)
+    created = db.courses.find_one({"_id": result.inserted_id})
+    return parse_json(created)
 
 
-@app.put("/admin/courses/{course_id}", response_model=CourseResponse)
-async def update_course(
-        course_id: str,
-        course_update: CourseUpdate,
-        admin_user: User = Depends(get_admin_user)
+@app.put("/admin/courses/{course_id}", response_model=Dict[str, Any])
+async def admin_update_course(
+    course_id: str,
+    body: dict,
+    admin_user: User = Depends(get_admin_user),
 ):
-    """
-    Update a course (admin only)
-    """
-    try:
-        if not ObjectId.is_valid(course_id):
-            raise HTTPException(status_code=400, detail="Invalid course ID")
-
-        existing = db.courses.find_one({"_id": ObjectId(course_id)})
-        if not existing:
-            raise HTTPException(status_code=404, detail="Course not found")
-
-        update_data = course_update.dict(exclude_unset=True)
-        update_data["updated_at"] = datetime.utcnow()
-
-        if update_data.get("instructor_id"):
-            instructor = db.users.find_one({"_id": ObjectId(update_data["instructor_id"])})
-            if not instructor:
-                raise HTTPException(status_code=404, detail="Instructor not found")
-            update_data["instructor_id"] = ObjectId(update_data["instructor_id"])
-
-        db.courses.update_one(
-            {"_id": ObjectId(course_id)},
-            {"$set": update_data}
-        )
-
-        updated_course = db.courses.find_one({"_id": ObjectId(course_id)})
-        return parse_json(updated_course)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+    if not ObjectId.is_valid(course_id):
+        raise HTTPException(status_code=400, detail="Invalid course ID")
+ 
+    # FIX #7: keep name/title in sync
+    if "title" in body and "name" not in body:
+        body["name"] = body["title"]
+    if "name" in body and "title" not in body:
+        body["title"] = body["name"]
+ 
+    body.pop("_id", None)
+    body["updated_at"] = datetime.utcnow()
+ 
+    if body.get("instructor_id") and ObjectId.is_valid(str(body["instructor_id"])):
+        body["instructor_id"] = ObjectId(body["instructor_id"])
+ 
+    db.courses.update_one({"_id": ObjectId(course_id)}, {"$set": body})
+    updated = db.courses.find_one({"_id": ObjectId(course_id)})
+    if not updated:
+        raise HTTPException(status_code=404, detail="Course not found")
+    updated.setdefault("title", updated.get("name", ""))
+    return parse_json(updated)
 
 @app.delete("/admin/courses/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_course(
