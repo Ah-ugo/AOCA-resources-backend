@@ -1662,15 +1662,16 @@ async def get_user_courses_dashboard(
 
 
 @app.get("/dashboard/courses/{course_id}", response_model=Dict[str, Any])
-async def get_course_for_student(
+async def get_course_for_student_v2(
     course_id: str,
     current_user: User = Depends(get_current_active_user),
 ):
+    """Student course detail — used by VideoPlayer.jsx."""
     if not ObjectId.is_valid(course_id):
         raise HTTPException(status_code=400, detail="Invalid course ID")
  
     enrollment = db.user_courses.find_one({
-        "user_id":   ObjectId(current_user.id),
+        "user_id":   ObjectId(str(current_user.id)),
         "course_id": ObjectId(course_id),
         "status":    "active",
     })
@@ -1692,9 +1693,11 @@ async def get_course_for_student(
                 "email": inst.get("email"),
             }
  
-    # Attach modules (needed by VideoPlayer sidebar)
-    course["modules"] = list(db.modules.find({"course_id": ObjectId(course_id)}).sort("order", 1)) \
-        if db.list_collection_names().__contains__("modules") else course.get("modules", [])
+    # BUG 8 FIX: safe module fetch — no __contains__ hack
+    modules_from_collection = list(
+        db.modules.find({"course_id": ObjectId(course_id)}).sort("order", 1)
+    )
+    course["modules"] = modules_from_collection or course.get("modules", [])
  
     return parse_json(course)
 
@@ -1910,6 +1913,130 @@ async def get_course_progress_fixed(
     }
 
 
+@app.post("/dashboard/progress/lesson/{lesson_id}/complete", response_model=Dict[str, Any])
+async def mark_lesson_complete(
+    lesson_id: str,
+    body: dict,
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Mark a lesson complete. Idempotent — safe to call twice.
+    Auto-generates certificate when course reaches 100%.
+    Body: { course_id: str }
+    """
+    course_id = body.get("course_id")
+    if not course_id or not ObjectId.is_valid(course_id):
+        raise HTTPException(status_code=400, detail="course_id required")
+    if not ObjectId.is_valid(lesson_id):
+        raise HTTPException(status_code=400, detail="Invalid lesson ID")
+ 
+    lesson_oid = ObjectId(lesson_id)
+    course_oid = ObjectId(course_id)
+    user_oid   = ObjectId(str(current_user.id))
+ 
+    # Require active enrollment
+    enrollment = db.user_courses.find_one({
+        "user_id": user_oid, "course_id": course_oid, "status": "active"
+    })
+    if not enrollment:
+        raise HTTPException(status_code=403, detail="Not enrolled in this course")
+ 
+    # Upsert progress — add lesson to completed set
+    db.progress.update_one(
+        {"user_id": user_oid, "course_id": course_oid},
+        {
+            "$addToSet": {"completed_lesson_ids": lesson_oid},
+            "$set": {"last_lesson_id": lesson_oid, "last_active": datetime.utcnow()},
+        },
+        upsert=True,
+    )
+ 
+    # Recalculate percentage
+    progress = db.progress.find_one({"user_id": user_oid, "course_id": course_oid})
+    course    = db.courses.find_one({"_id": course_oid})
+    all_lessons: list = []
+    for mod in (course.get("modules", []) if course else []):
+        all_lessons.extend(mod.get("lessons", []))
+ 
+    total = len(all_lessons)
+    done  = len(progress.get("completed_lesson_ids", []) if progress else [])
+    pct   = round((done / total) * 100) if total else 0
+ 
+    db.progress.update_one(
+        {"user_id": user_oid, "course_id": course_oid},
+        {"$set": {"percentage": pct}},
+    )
+ 
+    # Auto-generate certificate at 100%
+    certificate_id = None
+    if pct == 100:
+        existing_cert = db.certificates.find_one({"user_id": user_oid, "course_id": course_oid})
+        if not existing_cert:
+            cert = {
+                "user_id":           user_oid,
+                "course_id":         course_oid,
+                "user_name":         f"{current_user.first_name} {current_user.last_name}".strip(),
+                "course_name":       course.get("name", "") if course else "",
+                "issued_at":         datetime.utcnow(),
+                "verification_code": str(uuid.uuid4())[:8].upper(),
+            }
+            res = db.certificates.insert_one(cert)
+            certificate_id = str(res.inserted_id)
+ 
+    return {
+        "lesson_id":      lesson_id,
+        "percentage":     pct,
+        "completed":      True,
+        "course_complete": pct == 100,
+        "certificate_id": certificate_id,
+    }
+
+
+
+@app.get("/dashboard/courses/{course_id}/resume", response_model=Dict[str, Any])
+async def get_resume_state(
+    course_id: str,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Returns the lesson the student should resume. Used by the dashboard 'Continue' card."""
+    if not ObjectId.is_valid(course_id):
+        raise HTTPException(status_code=400, detail="Invalid course ID")
+ 
+    progress = db.progress.find_one({
+        "user_id":   ObjectId(str(current_user.id)),
+        "course_id": ObjectId(course_id),
+    })
+    last_id = progress.get("last_lesson_id") if progress else None
+ 
+    return {
+        "course_id":      course_id,
+        "last_lesson_id": str(last_id) if last_id else None,
+        "percentage":     progress.get("percentage", 0) if progress else 0,
+    }
+
+
+
+@app.get("/dashboard/certificates", response_model=List[Dict[str, Any]])
+async def get_my_certificates(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Student's earned certificates."""
+    certs = list(
+        db.certificates.find({"user_id": ObjectId(str(current_user.id))})
+        .sort("issued_at", -1)
+    )
+    return parse_json(certs)
+ 
+ 
+@app.get("/certificates/{verification_code}", response_model=Dict[str, Any])
+async def verify_certificate(verification_code: str):
+    """Public endpoint — verify a certificate by its QR/code."""
+    cert = db.certificates.find_one({"verification_code": verification_code.upper()})
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certificate not found or invalid code")
+    return parse_json(cert)
+
+
 @app.get("/students/my-enrollments", response_model=List[Dict[str, Any]])
 async def get_my_enrollments(
     current_user: User = Depends(get_current_active_user)
@@ -1952,72 +2079,57 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         manager.disconnect(websocket, user_id)
 
 @app.get("/instructor/dashboard/stats", response_model=Dict[str, Any])
-async def get_instructor_stats(current_user: User = Depends(get_instructor_user)):
-    """
-    Get statistics for the instructor dashboard
-    """
+async def get_instructor_stats_v2(
+    current_user: User = Depends(get_instructor_user),
+):
+    """Instructor dashboard statistics."""
     try:
-        user_id = ObjectId(current_user.id)
-        
-        # Count courses taught by instructor
-        total_courses = db.courses.count_documents({"instructor_id": user_id})
-        
-        # Get course IDs to find students
-        instructor_courses = list(db.courses.find({"instructor_id": user_id}, {"_id": 1}))
+        # BUG 9 FIX: always str() before ObjectId to avoid double-wrapping
+        user_oid = ObjectId(str(current_user.id))
+ 
+        total_courses = db.courses.count_documents({"instructor_id": user_oid})
+        instructor_courses = list(db.courses.find({"instructor_id": user_oid}, {"_id": 1}))
         course_ids = [c["_id"] for c in instructor_courses]
-        
-        # Count total students enrolled in these courses
-        total_students = db.user_courses.count_documents({"course_id": {"$in": course_ids}})
-        
-        # Count total assignments created
+ 
+        # Count only active enrollments
+        total_students = db.user_courses.count_documents({
+            "course_id": {"$in": course_ids}, "status": "active"
+        })
         total_assignments = db.assignments.count_documents({"course_id": {"$in": course_ids}})
-        
-        # Calculate pending grading (assignments submitted but not graded)
-        pending_grading = 0 
-        assignments = db.assignments.find({"course_id": {"$in": course_ids}})
-        for assignment in assignments:
-            if "submissions" in assignment:
-                for sub in assignment["submissions"]:
-                    if not sub.get("grade"):
-                        pending_grading += 1
-
-        # Recent activity (e.g., recent enrollments)
+ 
+        pending_grading = 0
+        for assignment in db.assignments.find({"course_id": {"$in": course_ids}}):
+            for sub in assignment.get("submissions", []):
+                if not sub.get("grade"):
+                    pending_grading += 1
+ 
         recent_enrollments = list(db.user_courses.aggregate([
-            {"$match": {"course_id": {"$in": course_ids}}},
+            {"$match": {"course_id": {"$in": course_ids}, "status": "active"}},
             {"$sort": {"enrolled_at": -1}},
             {"$limit": 5},
-            {"$lookup": {
-                "from": "users",
-                "localField": "user_id",
-                "foreignField": "_id",
-                "as": "student"
-            }},
-            {"$unwind": "$student"},
-            {"$lookup": {
-                "from": "courses",
-                "localField": "course_id",
-                "foreignField": "_id",
-                "as": "course"
-            }},
-            {"$unwind": "$course"},
+            {"$lookup": {"from": "users",   "localField": "user_id",   "foreignField": "_id", "as": "student"}},
+            {"$lookup": {"from": "courses", "localField": "course_id", "foreignField": "_id", "as": "course"}},
+            {"$unwind": {"path": "$student", "preserveNullAndEmptyArrays": True}},
+            {"$unwind": {"path": "$course",  "preserveNullAndEmptyArrays": True}},
             {"$project": {
                 "student_name": {"$concat": ["$student.first_name", " ", "$student.last_name"]},
-                "course_name": "$course.name",
-                "enrolled_at": 1
-            }}
+                "course_name":  "$course.name",
+                "enrolled_at":  1,
+            }},
         ]))
-
+ 
         return {
             "stats": {
-                "total_courses": total_courses,
-                "total_students": total_students,
+                "total_courses":    total_courses,
+                "total_students":   total_students,
                 "total_assignments": total_assignments,
-                "pending_grading": pending_grading
+                "pending_grading":  pending_grading,
             },
-            "recent_enrollments": parse_json(recent_enrollments)
+            "recent_enrollments": parse_json(recent_enrollments),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+ 
 
 @app.get("/instructor/courses", response_model=List[Dict[str, Any]])
 async def get_instructor_courses_fixed(
@@ -2036,6 +2148,140 @@ async def get_instructor_courses_fixed(
             "course_id": c["_id"], "status": "active"
         })
     return parse_json(courses)
+
+
+
+@app.get("/messages/conversations", response_model=Dict[str, Any])
+async def get_conversations(
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Return all conversations for the current user.
+    A conversation is modelled as a pair of users who have exchanged messages.
+    """
+    user_oid = ObjectId(str(current_user.id))
+ 
+    # Distinct chat partners
+    sent_to   = db.messages.distinct("recipient_id", {"sender_id": user_oid})
+    received  = db.messages.distinct("sender_id",    {"recipient_id": user_oid})
+    partner_ids = list({str(u) for u in sent_to + received})
+ 
+    conversations = []
+    for pid in partner_ids:
+        if not ObjectId.is_valid(pid):
+            continue
+        partner = db.users.find_one({"_id": ObjectId(pid)})
+        if not partner:
+            continue
+ 
+        # Last message in the thread
+        last_msg = db.messages.find_one(
+            {"$or": [
+                {"sender_id": user_oid, "recipient_id": ObjectId(pid)},
+                {"sender_id": ObjectId(pid), "recipient_id": user_oid},
+            ]},
+            sort=[("created_at", -1)],
+        )
+        unread_count = db.messages.count_documents({
+            "sender_id":    ObjectId(pid),
+            "recipient_id": user_oid,
+            "is_read":      False,
+        })
+ 
+        conversations.append({
+            "id":          pid,
+            "name":        f"{partner.get('first_name','')} {partner.get('last_name','')}".strip(),
+            "role":        partner.get("role", ""),
+            "lastMessage": last_msg.get("text", "") if last_msg else "",
+            "unread":      unread_count,
+            "updated_at":  last_msg.get("created_at").isoformat() if last_msg and last_msg.get("created_at") else None,
+        })
+ 
+    # Sort by most recent message
+    conversations.sort(key=lambda c: c.get("updated_at") or "", reverse=True)
+    return {"conversations": conversations}
+
+
+
+@app.get("/messages/conversations/{partner_id}", response_model=Dict[str, Any])
+async def get_conversation_messages(
+    partner_id: str,
+    current_user: User = Depends(get_current_active_user),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Return all messages between current user and a specific partner, oldest first."""
+    if not ObjectId.is_valid(partner_id):
+        raise HTTPException(status_code=400, detail="Invalid partner ID")
+ 
+    user_oid    = ObjectId(str(current_user.id))
+    partner_oid = ObjectId(partner_id)
+ 
+    msgs = list(
+        db.messages.find({
+            "$or": [
+                {"sender_id": user_oid,    "recipient_id": partner_oid},
+                {"sender_id": partner_oid, "recipient_id": user_oid},
+            ]
+        })
+        .sort("created_at", 1)
+        .skip(skip)
+        .limit(limit)
+    )
+ 
+    # Mark incoming messages as read
+    db.messages.update_many(
+        {"sender_id": partner_oid, "recipient_id": user_oid, "is_read": False},
+        {"$set": {"is_read": True}},
+    )
+ 
+    formatted = []
+    for m in msgs:
+        formatted.append({
+            "id":         str(m["_id"]),
+            "text":       m.get("text", ""),
+            "senderId":   str(m.get("sender_id", "")),
+            "chatId":     partner_id,
+            "timestamp":  m.get("created_at").isoformat() if m.get("created_at") else None,
+        })
+ 
+    return {"messages": formatted, "chatId": partner_id}
+ 
+ 
+@app.post("/messages/send", response_model=Dict[str, Any])
+async def send_message(
+    body: dict,
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Persist a message. The WebSocket delivers it in real time;
+    this endpoint persists it so it survives page reload.
+    Body: { recipient_id: str, text: str }
+    """
+    recipient_id = body.get("recipient_id")
+    text         = (body.get("text") or "").strip()
+ 
+    if not recipient_id or not ObjectId.is_valid(recipient_id):
+        raise HTTPException(status_code=400, detail="recipient_id required")
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+ 
+    msg = {
+        "sender_id":    ObjectId(str(current_user.id)),
+        "recipient_id": ObjectId(recipient_id),
+        "text":         text,
+        "is_read":      False,
+        "created_at":   datetime.utcnow(),
+    }
+    result = db.messages.insert_one(msg)
+ 
+    return {
+        "id":        str(result.inserted_id),
+        "text":      text,
+        "senderId":  str(current_user.id),
+        "chatId":    recipient_id,
+        "timestamp": msg["created_at"].isoformat(),
+    }
  
 
 
@@ -2651,47 +2897,47 @@ async def get_class_students(
 # ==================== ADMIN COURSES ENDPOINTS ====================
 
 @app.get("/admin/courses", response_model=Dict[str, Any])
-async def get_all_courses(
-        admin_user: User = Depends(get_admin_user),
-        skip: int = Query(0, ge=0),
-        limit: int = Query(100, ge=1, le=1000),
-        level: Optional[str] = None,
-        search: Optional[str] = None
+async def get_all_courses_v2(
+    admin_user: User = Depends(get_admin_user),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    level: Optional[str] = None,
+    search: Optional[str] = None,
 ):
-    """
-    Get all courses with pagination and filters (admin only)
-    """
+    """All courses for admin — with name/title normalised."""
     try:
-        query = {}
+        query: dict = {}
         if level:
             query["level"] = level
         if search:
             query["$or"] = [
-                {"name": {"$regex": search, "$options": "i"}},
-                {"description": {"$regex": search, "$options": "i"}}
+                {"name":        {"$regex": search, "$options": "i"}},
+                {"title":       {"$regex": search, "$options": "i"}},
+                {"description": {"$regex": search, "$options": "i"}},
             ]
-
+ 
         courses = list(db.courses.find(query).skip(skip).limit(limit))
-        total = db.courses.count_documents(query)
-
+        total   = db.courses.count_documents(query)
+ 
         for course in courses:
+            # BUG 10 FIX: ensure both name and title always present
+            course.setdefault("title", course.get("name", ""))
+            course.setdefault("name",  course.get("title", ""))
+ 
             if course.get("instructor_id"):
-                instructor = db.users.find_one({"_id": course["instructor_id"]})
-                if instructor:
+                inst = db.users.find_one({"_id": course["instructor_id"]})
+                if inst:
                     course["instructor"] = {
-                        "id": str(instructor["_id"]),
-                        "name": f"{instructor.get('first_name', '')} {instructor.get('last_name', '')}",
-                        "email": instructor.get("email", "")
+                        "id":    str(inst["_id"]),
+                        "name":  f"{inst.get('first_name','')} {inst.get('last_name','')}".strip(),
+                        "email": inst.get("email", ""),
                     }
-
-            course["enrollment_count"] = db.user_courses.count_documents({"course_id": course["_id"]})
-
-        return {
-            "courses": parse_json(courses),
-            "total": total,
-            "skip": skip,
-            "limit": limit
-        }
+ 
+            course["enrollment_count"] = db.user_courses.count_documents({
+                "course_id": course["_id"], "status": "active"
+            })
+ 
+        return {"courses": parse_json(courses), "total": total, "skip": skip, "limit": limit}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
