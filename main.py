@@ -2907,6 +2907,224 @@ async def get_class_students(
     }
 
 
+# ── Admin classes list ────────────────────────────────────────
+@app.get("/admin/classes", response_model=Dict[str, Any])
+async def admin_get_classes(
+    admin_user: User = Depends(get_admin_user),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=200),
+    search: Optional[str] = None,
+    course_id: Optional[str] = None,
+):
+    """
+    List all classes with pagination, optional search and course filter.
+    Frontend calls: GET /admin/classes?page=1&search=
+    """
+    skip = (page - 1) * limit
+    query: dict = {}
+ 
+    if search:
+        query["$or"] = [
+            {"title":       {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}},
+        ]
+ 
+    if course_id and ObjectId.is_valid(course_id):
+        query["course_id"] = ObjectId(course_id)
+ 
+    classes = list(db.classes.find(query).sort("date", -1).skip(skip).limit(limit))
+    total   = db.classes.count_documents(query)
+ 
+    for cls in classes:
+        # Attach course name
+        if cls.get("course_id"):
+            course = db.courses.find_one({"_id": cls["course_id"]})
+            if course:
+                cls["course"] = {
+                    "_id":  str(course["_id"]),
+                    "name": course.get("name", course.get("title", "")),
+                }
+ 
+        # Attach instructor name
+        if cls.get("instructor_id"):
+            inst = db.users.find_one({"_id": cls["instructor_id"]})
+            if inst:
+                cls["instructor"] = {
+                    "_id":   str(inst["_id"]),
+                    "name":  f"{inst.get('first_name','')} {inst.get('last_name','')}".strip(),
+                    "email": inst.get("email", ""),
+                }
+ 
+        # Student count
+        cls["students_count"] = len(cls.get("students", []))
+ 
+    return {
+        "classes":    parse_json(classes),
+        "total":      total,
+        "page":       page,
+        "limit":      limit,
+        "totalPages": max(1, -(-total // limit)),  # ceiling division
+    }
+ 
+ 
+# ── Admin create class ────────────────────────────────────────
+@app.post("/admin/classes", response_model=Dict[str, Any])
+async def admin_create_class(
+    body: dict,
+    admin_user: User = Depends(get_admin_user),
+):
+    """
+    Create a new class.
+    Body matches ClassCreate model: course_id, title, description,
+    date, duration, meet_link, instructor_id?, recording_link?, materials?
+    """
+    required = ["course_id", "title", "date", "duration", "meet_link"]
+    for field in required:
+        if not body.get(field):
+            raise HTTPException(status_code=400, detail=f"{field} is required")
+ 
+    if not ObjectId.is_valid(body["course_id"]):
+        raise HTTPException(status_code=400, detail="Invalid course_id")
+ 
+    if not db.courses.find_one({"_id": ObjectId(body["course_id"])}):
+        raise HTTPException(status_code=404, detail="Course not found")
+ 
+    # Parse date string → datetime
+    if isinstance(body.get("date"), str):
+        try:
+            body["date"] = datetime.fromisoformat(body["date"].replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use ISO 8601.")
+ 
+    class_doc = {
+        "course_id":      ObjectId(body["course_id"]),
+        "title":          body["title"],
+        "description":    body.get("description", ""),
+        "date":           body["date"],
+        "duration":       int(body.get("duration", 60)),
+        "meet_link":      body["meet_link"],
+        "recording_link": body.get("recording_link", ""),
+        "materials":      body.get("materials", []),
+        "students":       [],
+        "created_at":     datetime.utcnow(),
+        "updated_at":     datetime.utcnow(),
+    }
+ 
+    if body.get("instructor_id") and ObjectId.is_valid(body["instructor_id"]):
+        class_doc["instructor_id"] = ObjectId(body["instructor_id"])
+ 
+    result  = db.classes.insert_one(class_doc)
+    created = db.classes.find_one({"_id": result.inserted_id})
+    return parse_json(created)
+ 
+ 
+# ── Admin get one class ───────────────────────────────────────
+@app.get("/admin/classes/{class_id}", response_model=Dict[str, Any])
+async def admin_get_class(
+    class_id: str,
+    admin_user: User = Depends(get_admin_user),
+):
+    """Get a single class with course + instructor details."""
+    if not ObjectId.is_valid(class_id):
+        raise HTTPException(status_code=400, detail="Invalid class ID")
+ 
+    cls = db.classes.find_one({"_id": ObjectId(class_id)})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Class not found")
+ 
+    if cls.get("course_id"):
+        course = db.courses.find_one({"_id": cls["course_id"]})
+        if course:
+            cls["course"] = {
+                "_id":  str(course["_id"]),
+                "name": course.get("name", course.get("title", "")),
+            }
+ 
+    if cls.get("instructor_id"):
+        inst = db.users.find_one({"_id": cls["instructor_id"]})
+        if inst:
+            cls["instructor"] = {
+                "_id":   str(inst["_id"]),
+                "name":  f"{inst.get('first_name','')} {inst.get('last_name','')}".strip(),
+                "email": inst.get("email", ""),
+            }
+ 
+    return parse_json(cls)
+ 
+ 
+# ── Admin update class ────────────────────────────────────────
+@app.put("/admin/classes/{class_id}", response_model=Dict[str, Any])
+async def admin_update_class(
+    class_id: str,
+    body: dict,
+    admin_user: User = Depends(get_admin_user),
+):
+    """Update a class. Accepts partial updates — only provided fields are changed."""
+    if not ObjectId.is_valid(class_id):
+        raise HTTPException(status_code=400, detail="Invalid class ID")
+ 
+    existing = db.classes.find_one({"_id": ObjectId(class_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Class not found")
+ 
+    # Remove immutable fields
+    for field in ("_id", "students", "created_at"):
+        body.pop(field, None)
+ 
+    # Convert IDs
+    if body.get("course_id") and ObjectId.is_valid(str(body["course_id"])):
+        body["course_id"] = ObjectId(body["course_id"])
+ 
+    if body.get("instructor_id") and ObjectId.is_valid(str(body["instructor_id"])):
+        body["instructor_id"] = ObjectId(body["instructor_id"])
+    elif "instructor_id" in body and not body["instructor_id"]:
+        body["instructor_id"] = None
+ 
+    # Parse date
+    if isinstance(body.get("date"), str):
+        try:
+            body["date"] = datetime.fromisoformat(body["date"].replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+ 
+    if "duration" in body:
+        body["duration"] = int(body["duration"] or 60)
+ 
+    body["updated_at"] = datetime.utcnow()
+ 
+    db.classes.update_one({"_id": ObjectId(class_id)}, {"$set": body})
+    updated = db.classes.find_one({"_id": ObjectId(class_id)})
+    return parse_json(updated)
+ 
+ 
+# ── Admin delete class ────────────────────────────────────────
+@app.delete("/admin/classes/{class_id}", response_model=Dict[str, Any])
+async def admin_delete_class(
+    class_id: str,
+    admin_user: User = Depends(get_admin_user),
+):
+    """
+    Delete a class. Also clears class_id from all user_courses records
+    that referenced it, dropping those students back to 'approved' status.
+    """
+    if not ObjectId.is_valid(class_id):
+        raise HTTPException(status_code=400, detail="Invalid class ID")
+ 
+    existing = db.classes.find_one({"_id": ObjectId(class_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Class not found")
+ 
+    # Drop class reference from enrollments — students revert to approved
+    db.user_courses.update_many(
+        {"class_id": ObjectId(class_id)},
+        {"$set": {"class_id": None, "status": "approved"}}
+    )
+ 
+    db.classes.delete_one({"_id": ObjectId(class_id)})
+ 
+    return {"success": True, "message": "Class deleted successfully"}
+ 
+
 # ==================== ADMIN COURSES ENDPOINTS ====================
 
 @app.get("/admin/courses", response_model=Dict[str, Any])
