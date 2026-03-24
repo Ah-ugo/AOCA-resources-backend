@@ -3403,6 +3403,63 @@ async def remove_user_from_course(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/admin/courses/{course_id}/students", response_model=Dict[str, Any])
+async def get_course_students(
+    course_id: str,
+    admin_user: User = Depends(get_admin_user),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """
+    All students enrolled in a course (any status), with their class and progress.
+    Called by the course detail/preview page.
+    """
+    if not ObjectId.is_valid(course_id):
+        raise HTTPException(status_code=400, detail="Invalid course ID")
+ 
+    course = db.courses.find_one({"_id": ObjectId(course_id)})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+ 
+    enrollments = list(
+        db.user_courses.find({"course_id": ObjectId(course_id)})
+        .skip(skip).limit(limit)
+    )
+    total = db.user_courses.count_documents({"course_id": ObjectId(course_id)})
+ 
+    result = []
+    for enc in enrollments:
+        student = db.users.find_one({"_id": enc.get("user_id")})
+        if not student:
+            continue
+ 
+        class_doc = db.classes.find_one({"_id": enc.get("class_id")}) if enc.get("class_id") else None
+        progress  = db.progress.find_one({"user_id": enc["user_id"], "course_id": ObjectId(course_id)})
+ 
+        result.append({
+            "enrollment_id": str(enc["_id"]),
+            "status":        enc.get("status", "pending"),
+            "enrolled_at":   enc.get("enrolled_at").isoformat() if enc.get("enrolled_at") else None,
+            "student_id":    str(student["_id"]),
+            "name":          f"{student.get('first_name','')} {student.get('last_name','')}".strip(),
+            "email":         student.get("email", ""),
+            "phone":         student.get("phone", ""),
+            "class_id":      str(enc["class_id"]) if enc.get("class_id") else None,
+            "class_title":   class_doc.get("title") if class_doc else None,
+            "progress_pct":  progress.get("percentage", 0) if progress else 0,
+            "last_active":   progress.get("last_active").isoformat() if progress and progress.get("last_active") else None,
+        })
+ 
+    return {
+        "course_id":    course_id,
+        "course_name":  course.get("name", course.get("title", "")),
+        "students":     result,
+        "total":        total,
+        "skip":         skip,
+        "limit":        limit,
+    }
+
+
 # ==================== ADMISSION INQUIRIES ADMIN ====================
 
 @app.get("/admin/admission-inquiries", response_model=Dict[str, Any])
