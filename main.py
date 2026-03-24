@@ -751,23 +751,22 @@ def parse_json(data):
     """Convert MongoDB documents to JSON serializable format"""
     if data is None:
         return None
+    
+    # Fix: Handle ObjectId and datetime explicitly before containers
+    if isinstance(data, ObjectId):
+        return str(data)
+    if isinstance(data, datetime):
+        return data.isoformat()
+        
     if isinstance(data, list):
         return [parse_json(item) for item in data]
     if isinstance(data, dict):
         new_data = {}
         for key, value in data.items():
-            if isinstance(value, ObjectId):
-                new_data[key] = str(value)
-            elif isinstance(value, datetime):
-                new_data[key] = value.isoformat()
-            elif isinstance(value, dict):
-                new_data[key] = parse_json(value)
-            elif isinstance(value, list):
-                new_data[key] = [parse_json(item) for item in value]
-            else:
-                new_data[key] = value
+            new_data[key] = parse_json(value)
         return new_data
     return data
+
 
 
 # ==================== PUBLIC ENDPOINTS ====================
