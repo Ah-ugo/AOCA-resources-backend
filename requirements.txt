@@ -12,3 +12,4 @@ pydantic
 pydantic-settings
 email-validator
 pytest
+python-multipart
